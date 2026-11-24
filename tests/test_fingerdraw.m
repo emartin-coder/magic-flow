@@ -191,6 +191,13 @@ int main(void) {
         for (int i = 0; i < 20; i++) { jtTestPointer.x += 10; frame(1, L_[0], NULL, 0); }
         { CGPoint at = jtTestPointer; frame(0, L_[0], NULL, 0); // lift: released on this frame, where the cursor is
           expect(mmLiftPtr.x == at.x && mmDragging == 0 ? "lift: released at once, at the cursor" : "lift: WRONG time or spot", "Drag released"); }
+        { mmDragScrollSum = 0; int jitter = 0, slide = 0;
+          for (int i = 0; i < 5; i++) jitter += mmDragScrollPasses(1.5, 0.5); // resting finger: 10 points total
+          for (int i = 0; i < 3; i++) slide += mmDragScrollPasses(6, 0);       // deliberate slide
+          int ok = jitter == 0 && slide >= 1;
+          if (!ok) failures++;
+          printf("%s  %-44s jitter passed %d, slide passed %d\n", ok ? "PASS" : "FAIL",
+                 "scroll during drag: jitter held, slide passes", jitter, slide); }
         clr(); jtTestPointer.x += 10; frame(1, L_[0], NULL, 0); jtTestPointer.x += 10; frame(1, L_[0], NULL, 0);
         expect("finger flickers back while the mouse moves (re-grab)", "Drag");
         idle(0.3, NULL, 0);

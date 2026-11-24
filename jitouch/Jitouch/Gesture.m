@@ -192,6 +192,15 @@ static volatile int mmDragging; // 1: dragging, pointer moves become drags. 2: f
 static volatile double mmLastMoveWall; // last time the pointer moved on its own (not while we drag)
 static volatile double mmLastFrameWall, mmLastReleaseWall; // last touch frame; last drag release
 static volatile int mmHwPress; // a real button press during our drag: it owns the button now
+// Scroll during a fingertip drag (to extend a text selection): the resting drag finger jitters a few points, so
+// scrolls are held back until the finger has slid mmDragScrollMin points in total, then pass for the rest of the drag.
+static const double mmDragScrollMin = 12; // ponytail: knob; raise it if drags start scrolling on their own
+static double mmDragScrollSum; // reset to 0 when a drag starts
+static int mmDragScrollPasses(double dy, double dx) {
+    if (mmDragScrollSum >= mmDragScrollMin) return 1;
+    mmDragScrollSum += fabs(dy) + fabs(dx);
+    return 0;
+}
 static CGPoint mmLiftPtr; // where the pointer was on the frame the finger lifted
 void mmForceRelease(void);
 static void mmLogLine(const char *line);
@@ -3091,6 +3100,9 @@ static CGEventRef CGEventCallback(CGEventTapProxy proxy, CGEventType type, CGEve
     } else if (type == kCGEventScrollWheel) {
         if (!isMMFingerRecognizing)
             mmLastScrollWall = CFAbsoluteTimeGetCurrent();
+        if (mmDragging == 1 && !magicMouseThreeFingerFlag && !isTrackpadRecognizing && !isMMFingerRecognizing)
+            return mmDragScrollPasses(CGEventGetDoubleValueField(event, kCGScrollWheelEventPointDeltaAxis1),
+                                      CGEventGetDoubleValueField(event, kCGScrollWheelEventPointDeltaAxis2)) ? event : NULL;
         if (magicMouseThreeFingerFlag || isTrackpadRecognizing || isMMFingerRecognizing || mmDragging)
             return NULL;
         else if (autoScrollFlag) {
@@ -4733,6 +4745,7 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
         // Press where the pointer is now: posting at the older touch point yanks the real cursor back there.
         mmPost(kCGEventLeftMouseDown, mmPointer(), kCGMouseButtonLeft, 1);
 #endif
+        mmDragScrollSum = 0;
         mmDragging = 1; // only after the press is out, so no drag move can precede it
         { char line[120];
           snprintf(line, sizeof line, "drag: mouse down (mouse still %.0f ms before the touch)", preMoveGap * 1000);
