@@ -17,6 +17,7 @@
 - (void)addPointX:(float)x Y:(float)y;
 - (void)breakStroke;
 - (void)setUpWindowForMouseSurface;
+- (void)setUpWindowForMouseSurfaceAtX:(float)x Y:(float)y;
 - (void)addRelativePointX:(float)x Y:(float)y;
 - (void)clear;
 - (void)refresh;

@@ -22,7 +22,7 @@ echo "Signing with: $SIGN_ID"
 clang -fno-objc-arc -fobjc-exceptions -O2 -arch arm64 -mmacosx-version-min=11.0 \
   -include $SRC/Jitouch_Prefix.pch -I$SRC $SRC/*.m support/MultitouchSupport.tbd \
   -framework Cocoa -framework Carbon -framework IOKit -framework ScriptingBridge -framework ApplicationServices \
-  -o $B/Jitouch
+  -framework CoreAudio -framework AudioToolbox -o $B/Jitouch
 
 # 2. Icon: render 1024px PNG, scale to every size macOS wants, pack into .icns.
 swift support/make_icon.swift $B/icon_1024.png
