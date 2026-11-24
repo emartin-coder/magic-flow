@@ -53,6 +53,7 @@ static float magicMouseHeight = 800;
     scr = [[arr objectAtIndex:isIn] frame];
     orig = scr.origin;
     size = scr.size;
+    gestureView.pad = 0;
     [self setFrame:NSMakeRect(orig.x+size.width/2 - trackpadWidth/2, orig.y+size.height/2 - trackpadHeight/2, trackpadWidth, trackpadHeight) display:YES];
 }
 // Fingertip drawing on the Magic Mouse: same height as the trackpad box, but as narrow as the mouse surface
@@ -62,7 +63,29 @@ static float magicMouseHeight = 800;
     [self setUpWindowForTrackpad]; // picks the screen under the pointer and centers on it
     NSRect f = [self frame];
     float width = (trackpadHeight - 130) * (10.0f / 15.0f) + 180;
-    [self setFrame:NSMakeRect(f.origin.x + (f.size.width - width) / 2, f.origin.y, width, f.size.height) display:YES];
+    float pad = 30; // the star and its glow reach ~30 px past the fingertip
+    gestureView.pad = pad;
+    [self setFrame:NSMakeRect(f.origin.x + (f.size.width - width) / 2 - pad, f.origin.y - pad, width + 2 * pad, f.size.height + 2 * pad) display:YES];
+}
+// Same box, moved so the first touch (x, y) lands under the pointer; kept on the pointer's screen.
+// The math mirrors GestureView addPointX: (15 px margin, 180 x 130 total margin, 100 px hint gap).
+- (void)setUpWindowForMouseSurfaceAtX:(float)x Y:(float)y {
+    [self setUpWindowForMouseSurface];
+    NSRect f = [self frame];
+    CGEventRef ev = CGEventCreate(NULL);
+    CGPoint loc = CGEventGetUnflippedLocation(ev);
+    CFRelease(ev);
+    float pad = gestureView.pad;
+    f.origin.x = loc.x - (x * (f.size.width - 180 - 2 * pad) + 15 + pad);
+    f.origin.y = loc.y - (y * (f.size.height - 130 - 2 * pad) + 115 + pad);
+    for (NSScreen *s in [NSScreen screens]) {
+        NSRect r = [s frame];
+        if (!NSPointInRect(loc, r)) continue;
+        f.origin.x = MAX(r.origin.x, MIN(f.origin.x, NSMaxX(r) - f.size.width));
+        f.origin.y = MAX(r.origin.y, MIN(f.origin.y, NSMaxY(r) - f.size.height));
+        break;
+    }
+    [self setFrame:f display:YES];
 }
 - (void)setUpWindowForMagicMouse {
     CGEventRef ourEvent = CGEventCreate(NULL);

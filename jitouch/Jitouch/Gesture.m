@@ -19,6 +19,8 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <Foundation/Foundation.h>
 #import <IOKit/IOKitLib.h>
+#import <CoreAudio/CoreAudio.h>
+#import <AudioToolbox/AudioToolbox.h>
 
 #import "Settings.h"
 #import "JitouchAppDelegate.h"
@@ -192,6 +194,9 @@ static volatile int mmDragging; // 1: dragging, pointer moves become drags. 2: f
 static volatile double mmLastMoveWall; // last time the pointer moved on its own (not while we drag)
 static volatile double mmLastFrameWall, mmLastReleaseWall; // last touch frame; last drag release
 static volatile int mmHwPress; // a real button press during our drag: it owns the button now
+static volatile int mmStripPending; // a touch on the volume strip is undecided: hold back its scroll events
+static int mmVolSteps; // volume updates in the current slide (log, tests)
+static float mmVolLevel, mmVolMaxJump; // current smoothed level; biggest single-frame change (tests)
 static CGPoint mmLiftPtr; // where the pointer was on the frame the finger lifted
 void mmForceRelease(void);
 static void mmLogLine(const char *line);
@@ -3091,7 +3096,7 @@ static CGEventRef CGEventCallback(CGEventTapProxy proxy, CGEventType type, CGEve
     } else if (type == kCGEventScrollWheel) {
         if (!isMMFingerRecognizing)
             mmLastScrollWall = CFAbsoluteTimeGetCurrent();
-        if (magicMouseThreeFingerFlag || isTrackpadRecognizing || isMMFingerRecognizing || mmDragging)
+        if (magicMouseThreeFingerFlag || isTrackpadRecognizing || isMMFingerRecognizing || mmDragging || mmStripPending)
             return NULL;
         else if (autoScrollFlag) {
             int64_t sc = CGEventGetIntegerValueField(event, kCGScrollWheelEventDeltaAxis1);
@@ -4435,6 +4440,7 @@ static void mmDragAbandon(void) { // call with mmLock held
 // Let go of a finger-drag now (quit, SIGTERM, Jitouch turned off). Any thread; mmLock must NOT be held.
 void mmForceRelease(void) {
     pthread_mutex_lock(&mmLock);
+    mmStripPending = 0; // never leave scrolling blocked when the recognizer stops running
     if (mmDragging) {
         mmLiftPtr = mmPointer();
         mmLogLine("drag: released because Jitouch is quitting or turned off");
@@ -4463,6 +4469,96 @@ static void mmDragWatchdog(int gen) {
             }
         }
         pthread_mutex_unlock(&mmLock);
+    });
+#endif
+}
+
+// One fine volume step: a volume key with Option+Shift held, which macOS treats as a quarter step (checked live
+// 2026-11-11: 81 -> 83 -> 84, back to 81). Same events as KeyUtility's simulateSpecialKey, plus those modifiers.
+static void mmVolumeKey(int up) {
+    @autoreleasepool {
+        int key = up ? NX_KEYTYPE_SOUND_UP : NX_KEYTYPE_SOUND_DOWN;
+        NSEventModifierFlags mods = NSEventModifierFlagOption | NSEventModifierFlagShift;
+        for (int state = 0xa; state <= 0xb; state++) { // key down, then key up
+            NSEvent *e = [NSEvent otherEventWithType:NSEventTypeSystemDefined location:NSZeroPoint
+                                       modifierFlags:(state << 8) | mods timestamp:0 windowNumber:0 context:NULL
+                                             subtype:8 data1:(key << 16) | (state << 8) data2:-1];
+            CGEventRef c = [e CGEvent];
+            CGEventSetFlags(c, (CGEventFlags)mods);
+            CGEventPost(kCGSessionEventTap, c);
+        }
+    }
+}
+
+// Smooth volume: set the default output's main volume directly, a Float32 from 0 to 1 (AudioHardwareService.h,
+// kAudioHardwareServiceDeviceProperty_VirtualMainVolume). Measured 0.5-0.8 ms per set on eqMac (2026-11-11), so it
+// can follow the finger every touch frame instead of in key-sized jumps. A device that can't be set uses the keys.
+static AudioObjectID mmVolDev;
+static AudioObjectPropertyAddress mmVolAddr = {kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
+                                               kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain};
+static AudioObjectPropertyAddress mmMuteAddr = {kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput,
+                                                kAudioObjectPropertyElementMain};
+static int mmVolBegin(float *now, int *muted) { // 1 if the volume can be set directly; *now = current level
+#ifdef JITOUCH_TEST
+    *now = 0.5f; *muted = 0;
+    return 1;
+#endif
+    AudioObjectPropertyAddress def = {kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
+                                      kAudioObjectPropertyElementMain};
+    UInt32 sz = sizeof mmVolDev;
+    Boolean settable = 0;
+    Float32 v = 0;
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &def, 0, NULL, &sz, &mmVolDev) ||
+        !AudioObjectHasProperty(mmVolDev, &mmVolAddr) ||
+        AudioObjectIsPropertySettable(mmVolDev, &mmVolAddr, &settable) || !settable)
+        return 0;
+    sz = sizeof v;
+    if (AudioObjectGetPropertyData(mmVolDev, &mmVolAddr, 0, NULL, &sz, &v)) return 0;
+    UInt32 m = 0;
+    sz = sizeof m;
+    *muted = AudioObjectHasProperty(mmVolDev, &mmMuteAddr) &&
+             !AudioObjectGetPropertyData(mmVolDev, &mmMuteAddr, 0, NULL, &sz, &m) && m;
+    *now = v;
+    return 1;
+}
+static void mmVolSet(float v, int unmute) { // a serial queue keeps audio calls off the touch thread; newest value wins
+#ifdef JITOUCH_TEST
+    return;
+#endif
+    static dispatch_queue_t q;
+    static volatile float latest;
+    static volatile int queued;
+    if (!q) q = dispatch_queue_create("jitouch.volume", DISPATCH_QUEUE_SERIAL);
+    latest = v;
+    if (unmute)
+        dispatch_async(q, ^{ UInt32 m = 0; AudioObjectSetPropertyData(mmVolDev, &mmMuteAddr, 0, NULL, sizeof m, &m); });
+    if (queued) return;
+    queued = 1;
+    dispatch_async(q, ^{
+        queued = 0;
+        Float32 x = latest;
+        AudioObjectSetPropertyData(mmVolDev, &mmVolAddr, 0, NULL, sizeof x, &x);
+    });
+}
+static void mmVolLabel(int percent, int show, int hide) { // "Volume 57%" over the mouse, on the main thread
+#ifndef JITOUCH_TEST
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (show) {
+            [gestureWindow clear];
+            [gestureWindow setUpWindowForMouseSurface];
+            [gestureWindow display];
+            [gestureWindow setLevel:NSScreenSaverWindowLevel];
+            [gestureWindow makeKeyAndOrderFront:nil];
+        }
+        if (hide) {
+            [gestureWindow setHintText: emptyString];
+            [gestureWindow clear];
+            [gestureWindow orderOut:nil];
+        } else {
+            char b[20];
+            snprintf(b, sizeof b, "Volume %d%%", percent);
+            [gestureWindow setHintText: b];
+        }
     });
 #endif
 }
@@ -4496,6 +4592,18 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
     static const float dst = 0.0002f;
 
     static int lastN = 0, drawId = -1, tapClicked = 0, moved = 0;
+    // Volume strip: a touch that lands on the very front of the mouse (y >= volZoneY) and slides sideways sets the
+    // volume, one volume-key step per volStep of travel. Real use never reached it: 63 recorded landings top out at
+    // y 0.78, all 2,269 recorded frames at 0.80, trained letters at 0.69. Taps, holds and drags there stay normal.
+    // ponytail: knobs. volStart must stay under the tap wobble limit (sqrt(tapMoveMax) = 0.028) to be seen first.
+    static const float volZoneY = 0.85f, volStart = 0.025f, volStep = 0.02f; // 0.02: a full-width slide ~ 50 quarter steps
+    static float volX;
+    // Smooth path: the level follows the finger (volGain = level change per full sensor width, from the level at
+    // the start), eased each frame by volEase so sensor jitter never shows. ponytail: knobs.
+    // volMaxRate caps one frame's change: frames come ~15 ms apart (recordings), so 0.04 still sweeps 0-100% in ~0.4 s.
+    static const float volGain = 1.0f, volEase = 0.45f, volMaxRate = 0.04f;
+    static float volStartLevel, volSent, volTarget;
+    static int volDirect, volMuted, volPercent;
     static double downT;
     static double tapStartWall;
     static double t0, hintTime = -1;
@@ -4565,10 +4673,29 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
         } else if (nFingers == 1 && !clicked && !scrolling && oneTouchOK && timestamp - t0 <= oneTouchWindow &&
                    hypot(mmPointer().x - touchPtr.x, mmPointer().y - touchPtr.y) > tapDragPx) {
             startDrag = 1; // landed on a still mouse, then the mouse moved right away
+        } else if (nFingers == 1 && !clicked && tapPos[1] >= volZoneY && fabsf(x - tapPos[0]) >= volStart &&
+                   fabsf(x - tapPos[0]) >= 2 * fabsf(y - tapPos[1])) {
+            mmStep = 7; // front strip, sideways slide: volume until the finger lifts
+            isMMFingerRecognizing = 1; // swallows the slide's scroll events and pauses other mouse gestures
+            volX = tapPos[0];
+            mmVolSteps = 0;
+            mmVolMaxJump = 0;
+            volDirect = mmVolBegin(&volStartLevel, &volMuted);
+            mmVolLevel = volSent = volTarget = volStartLevel;
+            volPercent = (int)lroundf(volStartLevel * 100);
+            if (volDirect) mmVolLabel(volPercent, 1, 0);
+            drawId = f->identifier;
+            { char line[100]; snprintf(line, sizeof line, "volume: sliding (landed at y=%.2f)", tapPos[1]); mmLogLine(line); }
         } else if (nFingers != 1 || clicked || scrolling || lenSqr(tapPos[0], tapPos[1], x, y) > tapMoveMax) {
 #ifdef JITOUCH_TRACE
             printf("%.3f   not ours: touches=%d held=%.3fs moved2=%.4f (max %.4f)\n", timestamp, nFingers, timestamp - t0, lenSqr(tapPos[0], tapPos[1], x, y), tapMoveMax);
 #endif
+            if (nFingers == 1 && !clicked && tapPos[1] >= 0.70f && tapPos[1] < volZoneY &&
+                fabsf(x - tapPos[0]) >= 2 * fabsf(y - tapPos[1])) { // a sideways slide just below the strip
+                char line[120];
+                snprintf(line, sizeof line, "volume-missed: sideways slide landed at y=%.2f (strip starts at %.2f)", tapPos[1], volZoneY);
+                mmLogLine(line);
+            }
             mmStep = 0; // moved before arming (a scroll), another finger, or a click
         } else if ((!oneTouchOK || timestamp - t0 > oneTouchWindow) &&
                    hypot(mmPointer().x - touchPtr.x, mmPointer().y - touchPtr.y) > pointerStill) {
@@ -4607,7 +4734,7 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
                 mmShown = 1; // the dot that says "draw now"
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [gestureWindow setHintText: emptyString];
-                    [gestureWindow setUpWindowForMouseSurface];
+                    [gestureWindow setUpWindowForMouseSurfaceAtX:x Y:y]; // drawing starts under the pointer
                     [gestureWindow display];
                     [gestureWindow setLevel:NSScreenSaverWindowLevel];
                     [gestureWindow makeKeyAndOrderFront:nil];
@@ -4650,6 +4777,50 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
             mmStep = 0; // the finger slid while the mouse stayed put: a scroll
         } else if (timestamp - t0 > tapMaxHold) {
             mmStep = 1; // too long for a tap: carry on as a first touch, so it can still arm a letter
+        }
+    } else if (mmStep == 7) { // volume slide on the front strip
+        if (nFingers != 1 || mmButtonDown()) { // lifted, a second finger, or a real click: done
+            mmStep = 0;
+            isMMFingerRecognizing = 0;
+            drawId = -1;
+            if (volDirect) {
+                mmVolLabel(0, 0, 1);
+                mmVolLevel = volTarget; // lifted before the easing caught up: finish where the finger said
+                if (mmVolLevel != volSent) mmVolSet(mmVolLevel, volMuted && mmVolLevel > volStartLevel + 0.01f);
+            }
+            { char line[120];
+              snprintf(line, sizeof line, "volume: done (%s, %d updates, %.0f%% -> %.0f%%)", volDirect ? "smooth" : "keys",
+                       mmVolSteps, volStartLevel * 100, mmVolLevel * 100);
+              mmLogLine(line); }
+        } else if (f && volDirect) {
+            float target = volTarget = fminf(1, fmaxf(0, volStartLevel + (x - tapPos[0]) * volGain));
+            float next = mmVolLevel + fminf(volMaxRate, fmaxf(-volMaxRate, (target - mmVolLevel) * volEase));
+            if (fabsf(target - next) < 0.001f) next = target;
+            if (fabsf(next - mmVolLevel) > mmVolMaxJump) mmVolMaxJump = fabsf(next - mmVolLevel);
+            mmVolLevel = next;
+            if (fabsf(mmVolLevel - volSent) >= 0.002f) { // ~0.2%: below that nobody can hear the change
+                int unmute = volMuted && mmVolLevel > volStartLevel + 0.01f;
+                if (unmute) volMuted = 0;
+                mmVolSet(mmVolLevel, unmute);
+                volSent = mmVolLevel;
+                mmVolSteps++;
+            }
+            int pct = (int)lroundf(mmVolLevel * 100);
+            if (pct != volPercent) { volPercent = pct; mmVolLabel(pct, 0, 0); }
+#ifdef JITOUCH_TEST
+            if (mmVolLevel != volStartLevel) jtTestRecognized = mmVolLevel > volStartLevel ? @"Volume Up" : @"Volume Down";
+#endif
+        } else if (f) { // fallback: fine volume keys (a device whose volume can't be set directly)
+            while (fabsf(x - volX) >= volStep) {
+                int up = x > volX;
+                volX += up ? volStep : -volStep;
+                mmVolSteps++;
+#ifdef JITOUCH_TEST
+                jtTestRecognized = up ? @"Volume Up" : @"Volume Down";
+#else
+                mmVolumeKey(up);
+#endif
+            }
         }
     } else if (mmStep == 5) { // dragging: the button comes up the instant the drag finger lifts, where the cursor is.
         // Posting the up at an older point snaps the cursor back there (log 16:04: released at (1725,135) with the
@@ -4755,6 +4926,7 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
         tapPos[0] = x;
         tapPos[1] = y;
     }
+    mmStripPending = mmStep == 1 && tapPos[1] >= volZoneY; // undecided strip touch: its scroll waits
     lastN = nFingers;
     pthread_mutex_unlock(&mmLock);
 }

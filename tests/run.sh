@@ -8,12 +8,12 @@ OUT=build/test_fingerdraw
 clang -fno-objc-arc -fobjc-exceptions -O1 -arch arm64 -mmacosx-version-min=11.0 -w \
   -include $SRC/Jitouch_Prefix.pch -I$SRC tests/test_fingerdraw.m \
   $(ls $SRC/*.m | grep -v -e '/main.m$' -e '/Gesture.m$') support/MultitouchSupport.tbd \
-  -framework Cocoa -framework Carbon -framework IOKit -framework ScriptingBridge -framework ApplicationServices \
+  -framework Cocoa -framework Carbon -framework IOKit -framework ScriptingBridge -framework ApplicationServices -framework CoreAudio -framework AudioToolbox \
   -o $OUT
 clang -fno-objc-arc -fobjc-exceptions -O1 -arch arm64 -mmacosx-version-min=11.0 -w -DJITOUCH_TRACE \
   -include $SRC/Jitouch_Prefix.pch -I$SRC tests/replay.m \
   $(ls $SRC/*.m | grep -v -e '/main.m$' -e '/Gesture.m$') support/MultitouchSupport.tbd \
-  -framework Cocoa -framework Carbon -framework IOKit -framework ScriptingBridge -framework ApplicationServices \
+  -framework Cocoa -framework Carbon -framework IOKit -framework ScriptingBridge -framework ApplicationServices -framework CoreAudio -framework AudioToolbox \
   -o build/replay
 clang -fno-objc-arc -O1 -arch arm64 -w tests/pd_eval.m $SRC/PDollar.m -framework Foundation -o build/pd_eval
 clang -arch arm64 -w tests/touch_probe.m support/MultitouchSupport.tbd -framework Foundation -framework ApplicationServices -o build/touch_probe

@@ -73,6 +73,9 @@ static void expect(const char *name, const char *want) {
            isMMFingerRecognizing ? " (still blocking scroll!)" : "");
 }
 
+// A check on state, not just on what was recognized: a false condition always fails.
+static void expect_if(int ok, const char *name, const char *want) { expect(name, ok ? want : "CHECK FAILED"); }
+
 static const P L_[] = {{0.40, 0.85}, {0.40, 0.45}, {0.68, 0.45}};
 static const P Z_[] = {{0.35, 0.85}, {0.65, 0.85}, {0.35, 0.45}, {0.65, 0.45}};
 
@@ -190,7 +193,7 @@ int main(void) {
         expect("tap, touch again, mouse moves (drag at once)", "Drag");
         for (int i = 0; i < 20; i++) { jtTestPointer.x += 10; frame(1, L_[0], NULL, 0); }
         { CGPoint at = jtTestPointer; frame(0, L_[0], NULL, 0); // lift: released on this frame, where the cursor is
-          expect(mmLiftPtr.x == at.x && mmDragging == 0 ? "lift: released at once, at the cursor" : "lift: WRONG time or spot", "Drag released"); }
+          expect_if(mmLiftPtr.x == at.x && mmDragging == 0, "lift: released at once, at the cursor", "Drag released"); }
         clr(); jtTestPointer.x += 10; frame(1, L_[0], NULL, 0); jtTestPointer.x += 10; frame(1, L_[0], NULL, 0);
         expect("finger flickers back while the mouse moves (re-grab)", "Drag");
         idle(0.3, NULL, 0);
@@ -243,13 +246,54 @@ int main(void) {
           // A real button press mid-drag: hand over quietly (no release of our own), drag mode off.
           reset(); frame(1, a, NULL, 0); jtTestPointer.x += 10; hold_for(5, a);
           mmHwPress = 1; hold_for(2, a);
-          expect(mmDragging == 0 && mmStep == 0 ? "real click mid-drag (hands over, no stray release)" : "real click mid-drag: STILL DRAGGING", "Drag");
+          expect_if(mmDragging == 0 && mmStep == 0, "real click mid-drag (hands over, no stray release)", "Drag");
           idle(0.3, NULL, 0);
           // Two-finger tap while dragging must not right-click.
           reset(); frame(1, a, NULL, 0); jtTestPointer.x += 10; frame(1, a, NULL, 0);
           { Finger second = touch(2, 0.55, 0.7); for (int i = 0; i < 3; i++) frame(1, a, &second, 1); }
           idle(0.3, NULL, 0);
           expect("two-finger tap during a drag (no right click)", "Drag released"); }
+
+        // Volume strip: the very front of the mouse (y >= 0.85). Slide sideways there; everything else stays normal.
+        { static const P right[] = {{0.40, 0.92}, {0.70, 0.92}}, left[] = {{0.60, 0.92}, {0.30, 0.92}};
+          static const P midSlide[] = {{0.40, 0.60}, {0.70, 0.60}}, upFromTop[] = {{0.50, 0.92}, {0.50, 0.50}};
+          reset(); stroke(right, 2, 15, NULL, 0); idle(0.3, NULL, 0);
+          expect("front strip, slide right (volume up)", "Volume Up");
+          reset(); stroke(left, 2, 15, NULL, 0); idle(0.3, NULL, 0);
+          expect("front strip, slide left (volume down)", "Volume Down");
+          reset(); tap(right[0], NULL, 0); idle(0.6, NULL, 0);
+          expect("front strip, tap (still a click)", "Click");
+          reset(); stroke(midSlide, 2, 15, NULL, 0); idle(0.3, NULL, 0);
+          expect("sideways slide lower down (no volume)", "(nothing)");
+          reset(); stroke(upFromTop, 2, 15, NULL, 0); idle(0.3, NULL, 0);
+          expect("front strip, slide toward you (no volume)", "(nothing)");
+          // Scroll is held back while a front-strip touch is undecided, and released once it isn't volume.
+          reset(); frame(1, right[0], NULL, 0); frame(1, right[0], NULL, 0);
+          { int held = mmStripPending;
+            static const P down40[] = {{0.40, 0.92}, {0.40, 0.50}}; // straight toward you from where it landed
+            stroke(down40, 2, 15, NULL, 0);
+            int released = !mmStripPending && !isMMFingerRecognizing;
+            idle(0.3, NULL, 0);
+            expect_if(held && released, "strip touch holds scroll, then releases it (scroll toward you)", "(nothing)"); }
+          // Smooth: a long slide reaches the top, and no single touch frame jumps the volume by more than 6 points.
+          reset(); { static const P wide[] = {{0.10, 0.92}, {0.90, 0.92}}; stroke(wide, 2, 40, NULL, 0); }
+          { float level = mmVolLevel, jump = mmVolMaxJump; idle(0.3, NULL, 0);
+            printf("      (level %.2f, biggest one-frame change %.3f)\n", level, jump);
+            expect_if(level >= 0.999f && jump <= 0.06f, "full-width slide: reaches 100%, smoothly", "Volume Up"); }
+          // A quick flick still moves the volume smoothly, not in one jump.
+          reset(); { static const P flick[] = {{0.30, 0.92}, {0.60, 0.92}}; stroke(flick, 2, 3, NULL, 0); hold_for(10, flick[1]); }
+          { float level = mmVolLevel, jump = mmVolMaxJump; idle(0.3, NULL, 0);
+            printf("      (flick: level %.2f, biggest one-frame change %.3f)\n", level, jump);
+            expect_if(level > 0.75f && jump <= 0.06f, "quick flick: eased, no jump", "Volume Up"); }
+          // Lifting mid-ease still lands exactly where the finger stopped.
+          reset(); { static const P flick[] = {{0.30, 0.92}, {0.60, 0.92}}; stroke(flick, 2, 3, NULL, 0); }
+          frame(0, (P){0, 0}, NULL, 0);
+          { float level = mmVolLevel; idle(0.3, NULL, 0);
+            expect_if(fabsf(level - 0.80f) < 0.01f, "lift mid-ease: lands where the finger stopped", "Volume Up"); }
+          // A second finger ends the volume slide.
+          reset(); stroke(right, 2, 15, NULL, 0);
+          { Finger second = touch(2, 0.5, 0.6); frame(1, right[1], &second, 1); int ended = mmStep == 0 && !isMMFingerRecognizing;
+            idle(0.3, NULL, 0); expect_if(ended, "second finger ends a volume slide", "Volume Up"); } }
 
         // Finger slips off for 0.1 s at the corner of an L and lands where it left: still one stroke.
         { static const P back[] = {{0.413, 0.45}, {0.68, 0.45}}; // lands 0.013 away, like the recorded slip
