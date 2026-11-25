@@ -8,12 +8,12 @@ OUT=build/test_fingerdraw
 clang -fno-objc-arc -fobjc-exceptions -O1 -arch arm64 -mmacosx-version-min=11.0 -w \
   -include $SRC/Jitouch_Prefix.pch -I$SRC tests/test_fingerdraw.m \
   $(ls $SRC/*.m | grep -v -e '/main.m$' -e '/Gesture.m$') support/MultitouchSupport.tbd \
-  -framework Cocoa -framework Carbon -framework IOKit -framework ScriptingBridge -framework ApplicationServices \
+  -framework Cocoa -framework Carbon -framework IOKit -framework ScriptingBridge -framework ApplicationServices -framework CoreAudio -framework AudioToolbox \
   -o $OUT
 clang -fno-objc-arc -fobjc-exceptions -O1 -arch arm64 -mmacosx-version-min=11.0 -w -DJITOUCH_TRACE \
   -include $SRC/Jitouch_Prefix.pch -I$SRC tests/replay.m \
   $(ls $SRC/*.m | grep -v -e '/main.m$' -e '/Gesture.m$') support/MultitouchSupport.tbd \
-  -framework Cocoa -framework Carbon -framework IOKit -framework ScriptingBridge -framework ApplicationServices \
+  -framework Cocoa -framework Carbon -framework IOKit -framework ScriptingBridge -framework ApplicationServices -framework CoreAudio -framework AudioToolbox \
   -o build/replay
 clang -fno-objc-arc -O1 -arch arm64 -w tests/pd_eval.m $SRC/PDollar.m -framework Foundation -o build/pd_eval
 clang -arch arm64 -w tests/touch_probe.m support/MultitouchSupport.tbd -framework Foundation -framework ApplicationServices -o build/touch_probe
@@ -47,4 +47,12 @@ if [[ -f $LETTERS ]]; then
   MAX=$(sed -n 's/^static const float personalMaxScore = \([0-9.]*\)f;.*/\1/p' $SRC/Gesture.m)
   tests/personal_eval.py "$LETTERS" --max $MAX --negatives tests/fixtures/negatives/*.log(N) || fail=1
 fi
+# Recordings of normal use (build/touch_probe into tests/fixtures/negatives/, see README), replayed through the full
+# recognizer with your trained letters: each must fire exactly the letters listed in expected-letters.txt. This is
+# the check that one-stroke built-in capitals (C, L, V and the rest) don't go off while you scroll or click.
+for k in tests/fixtures/negatives/*.log(N); do
+  got=$(JITOUCH_LETTERS="$LETTERS" build/replay $k | sed -n 's/.*RECOGNIZED "\(.*\)"/\1/p' | { grep -E '^[A-Z]$' || true; } | tr '\n' ' ' | sed 's/ $//')
+  want=$(sed -n "s/^${k:t}: *//p" tests/fixtures/negatives/expected-letters.txt)
+  if [[ $got == $want ]]; then echo "PASS  normal use fires only [${want}]: ${k:t}"; else echo "FAIL  normal use fired [$got], expected [$want]: ${k:t}"; fail=1; fi
+done
 exit $fail

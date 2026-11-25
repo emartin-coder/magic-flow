@@ -36,6 +36,7 @@ int enHanded;
 //Magic Mouse
 int enMMAll;
 int enMMHanded;
+int mmEdgeMode[4] = {1, 0, 0, 0}; // front edge is volume until the settings say otherwise
 
 //Character Recognition
 int enCharRegTP;
@@ -221,6 +222,11 @@ static int notSynchronize;
     //Magic Mouse
     enMMAll = [[settings objectForKey:@"enMMAll"] intValue];
     enMMHanded = [[settings objectForKey:@"MMHanded"] intValue];
+    NSDictionary *edges = [settings objectForKey:@"EdgeModes"];
+    if ([edges isKindOfClass:[NSDictionary class]]) {
+        NSArray *names = @[@"Front", @"Back", @"Left", @"Right"];
+        for (int i = 0; i < 4; i++) { int m = [[edges objectForKey:names[i]] intValue]; mmEdgeMode[i] = m >= 0 && m <= 6 ? m : 0; }
+    }
 
     //Recognition
     enCharRegTP = [[settings objectForKey:@"enCharRegTP"] intValue];

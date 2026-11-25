@@ -19,6 +19,8 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <Foundation/Foundation.h>
 #import <IOKit/IOKitLib.h>
+#import <CoreAudio/CoreAudio.h>
+#import <AudioToolbox/AudioToolbox.h>
 
 #import "Settings.h"
 #import "JitouchAppDelegate.h"
@@ -192,8 +194,53 @@ static volatile int mmDragging; // 1: dragging, pointer moves become drags. 2: f
 static volatile double mmLastMoveWall; // last time the pointer moved on its own (not while we drag)
 static volatile double mmLastFrameWall, mmLastReleaseWall; // last touch frame; last drag release
 static volatile int mmHwPress; // a real button press during our drag: it owns the button now
+// Scroll during a fingertip drag (to extend a text selection): the resting drag finger jitters a few points, so
+// scrolls are held back until the finger has slid mmDragScrollMin points in total, then pass for the rest of the drag.
+static const double mmDragScrollMin = 12; // ponytail: knob; raise it if drags start scrolling on their own
+static double mmDragScrollSum; // reset to 0 when a drag starts
+static int mmDragScrollPasses(double dy, double dx) {
+    if (mmDragScrollSum >= mmDragScrollMin) return 1;
+    mmDragScrollSum += fabs(dy) + fabs(dx);
+    return 0;
+}
+static volatile int mmStripPending; // a touch on the volume strip is undecided: hold back its scroll events
+// Edge sliders (front, back, left, right; mmEdgeMode in Settings). Sensor y runs back (0) to front (1).
+// Sides only count above the thumb zone (y > 0.6), where a resting thumb is already ignored.
+static const float mmEdgeFrontY = 0.85f, mmEdgeBackY = 0.10f, mmEdgeSideX = 0.12f, mmEdgeSideMinY = 0.6f; // ponytail: knobs
+static NSString *const mmEdgeName[4] = {@"Front", @"Back", @"Left", @"Right"};
+static int mmEdgeAt(float x, float y) { // the edge a touch landed on, or -1
+    if (y >= mmEdgeFrontY) return 0;
+    if (y <= mmEdgeBackY) return 1;
+    if (y > mmEdgeSideMinY && x <= mmEdgeSideX) return 2;
+    if (y > mmEdgeSideMinY && x >= 1 - mmEdgeSideX) return 3;
+    return -1;
+}
+static float mmAlong(int edge, float x, float y) { return edge < 2 ? x : y; } // front/back slide sideways, sides slide forward
+static float mmAcross(int edge, float x, float y) { return edge < 2 ? y : x; }
+static int mmVolSteps; // volume updates in the current slide (log, tests)
+static float mmVolLevel, mmVolMaxJump; // current smoothed level; biggest single-frame change (tests)
 static CGPoint mmLiftPtr; // where the pointer was on the frame the finger lifted
 void mmForceRelease(void);
+
+// The pointer hides while a letter is drawn, so it doesn't distract. A background app may only hide it after asking
+// the window server to let it set the cursor in the background (a private CGS property, like the private
+// MultitouchSupport framework this app already uses). Every way a drawing ends shows it again.
+extern int _CGSDefaultConnection(void);
+extern int CGSSetConnectionProperty(int, int, CFStringRef, CFTypeRef);
+static volatile int mmCursorHidden;
+static void mmHideCursor(int hide) {
+    if (hide == mmCursorHidden) return;
+    mmCursorHidden = hide;
+#ifndef JITOUCH_TEST
+    dispatch_async(dispatch_get_main_queue(), ^{
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            CGSSetConnectionProperty(_CGSDefaultConnection(), _CGSDefaultConnection(), CFSTR("SetsCursorInBackground"), kCFBooleanTrue);
+        });
+        if (hide) CGDisplayHideCursor(kCGNullDirectDisplay); else CGDisplayShowCursor(kCGNullDirectDisplay);
+    });
+#endif
+}
 static void mmLogLine(const char *line);
 // Drag smoothness probe: how long each pointer move waited before the event tap (on the main thread) saw it.
 static volatile uint64_t mmLatN, mmLatSumUp, mmLatMaxUp; static volatile int64_t mmLatMach0;
@@ -262,6 +309,7 @@ static void turnOffCharacters() {
     isTrackpadRecognizing = 0;
     isMouseRecognizing = 0;
     isMMFingerRecognizing = 0;
+    mmHideCursor(0);
 }
 
 void turnOffGestures() {
@@ -3091,7 +3139,10 @@ static CGEventRef CGEventCallback(CGEventTapProxy proxy, CGEventType type, CGEve
     } else if (type == kCGEventScrollWheel) {
         if (!isMMFingerRecognizing)
             mmLastScrollWall = CFAbsoluteTimeGetCurrent();
-        if (magicMouseThreeFingerFlag || isTrackpadRecognizing || isMMFingerRecognizing || mmDragging)
+        if (mmDragging == 1 && !magicMouseThreeFingerFlag && !isTrackpadRecognizing && !isMMFingerRecognizing)
+            return mmDragScrollPasses(CGEventGetDoubleValueField(event, kCGScrollWheelEventPointDeltaAxis1),
+                                      CGEventGetDoubleValueField(event, kCGScrollWheelEventPointDeltaAxis2)) ? event : NULL;
+        if (magicMouseThreeFingerFlag || isTrackpadRecognizing || isMMFingerRecognizing || mmDragging || mmStripPending)
             return NULL;
         else if (autoScrollFlag) {
             int64_t sc = CGEventGetIntegerValueField(event, kCGScrollWheelEventDeltaAxis1);
@@ -3148,7 +3199,7 @@ static CGEventRef CGEventCallback(CGEventTapProxy proxy, CGEventType type, CGEve
         dispatch_async(dispatch_get_main_queue(), ^{ // main: the retry NSTimer needs a running run loop
             if (recreatingEventTap) return;
             recreatingEventTap = TRUE;
-            NSLog(@"Received kCGEventTapDisabledByTimeout; attempting to recreate CGEventTap. Allow Jitouch in System Preferences -> Privacy -> Accessibility.");
+            NSLog(@"Received kCGEventTapDisabledByTimeout; attempting to recreate CGEventTap. Allow Magic Flow in System Preferences -> Privacy -> Accessibility.");
             CFMachPortInvalidate(eventTap);
             CFRelease(eventTap);
             eventTap = [me createEventTap];
@@ -3360,7 +3411,7 @@ CFMutableArrayRef deviceList;
 
         eventTap = [me createEventTap];
         if (eventTap == nil) {
-            NSLog(@"Could not create CGEventTap. Allow Jitouch in System Preferences -> Privacy -> Accessibility.");
+            NSLog(@"Could not create CGEventTap. Allow Magic Flow in System Preferences -> Privacy -> Accessibility.");
             recreatingEventTap = TRUE;
             eventTapTries = 0;
             [NSTimer scheduledTimerWithTimeInterval:1.0 target:me selector:@selector(createEventTapTimer:) userInfo:nil repeats:NO];
@@ -4235,6 +4286,32 @@ static void trackpadRecognizerOne(const Finger *data, int nFingers, double times
 #define MM_MAX_POINTS 2048
 static int mmStep = 0, mmShown = 0, mmStrokes = 0, mmGen = 0, mmNPts = 0;
 static PDPoint mmPts[MM_MAX_POINTS];
+static float mmPtSize[MM_MAX_POINTS]; // contact size when each point was added, for the lift trim
+
+// A lifting fingertip's contact shrinks and its center slides for the last few frames (real F recordings: 2-4
+// frames, 1.5-3.3% of the mouse width), which left a hook at the end of every stroke. At lift, drop up to
+// mmLiftTrimMax trailing points whose contact had shrunk below mmLiftTrimSize of the stroke's median size.
+// Trailing points only, so ink mid-stroke is never cut. Returns how many were dropped. ponytail: knobs.
+static const int mmLiftTrimMax = 4;
+static const float mmLiftTrimSize = 0.6f;
+static int mmTrimLift(int stroke) {
+    int start = mmNPts;
+    while (start > 0 && mmPts[start - 1].stroke == stroke) start--;
+    int n = mmNPts - start;
+    if (n < 4) return 0;
+    float sorted[n];
+    for (int i = 0; i < n; i++) { // insertion sort for the median: strokes are short
+        float v = mmPtSize[start + i];
+        int j = i;
+        while (j > 0 && sorted[j - 1] > v) { sorted[j] = sorted[j - 1]; j--; }
+        sorted[j] = v;
+    }
+    float limit = mmLiftTrimSize * sorted[n / 2];
+    int drop = 0;
+    while (drop < mmLiftTrimMax && n - drop > 2 && mmPtSize[mmNPts - 1 - drop] < limit) drop++;
+    mmNPts -= drop;
+    return drop;
+}
 static float mmFirst[2], mmLast[2], mmTop, mmBottom, mmLeft, mmRight; // stroke 1 only, for Jitouch's recognizer
 static const double strokeGap = 0.5;   // recorded multi-stroke F: 0.2-0.38 s between strokes
 static const float pdollarMaxScore = 2.0f; // ponytail: real F (own templates) 0.68-1.07, built-ins 1.4-1.7; raise if real letters read as nothing
@@ -4242,6 +4319,35 @@ static const float pdollarMaxScore = 2.0f; // ponytail: real F (own templates) 0
 // Calibrated 2026-11-10: your trained letters scored at most 0.85 (leave-one-out); the closest recorded scroll
 // stroke scored 2.32. tests/run.sh re-checks both against your current letters.txt on every build.
 static const float personalMaxScore = 1.5f;
+static const float oneStrokeMaxScore = 1.6f, oneStrokeMargin = 0.15f; // built-in one-stroke capitals. ponytail: knobs
+static const float mmLineSpread = 0.12f; // ponytail: knob
+static int mmFromBuiltin; // the last recognition was a built-in one-stroke capital
+static const float yoursTieBand = 0.3f; // your letter wins if within this of the best built-in. ponytail: knob
+// ...but only when it's a strong match itself: your 26 one-stroke samples all score 1.18 or better as their own letter,
+// and a clear C was lost to a weak trained O at 1.44 (log, 2026-11-24). ponytail: knob
+static const float yoursCloseCallMax = 1.25f;
+
+// A stroke that stays near one straight line (there and back counts too) is a scroll or a flick, never a letter.
+// Spread across the stroke's main direction, relative to its length along it.
+static int mmLineLike(void) {
+    if (mmNPts < 3) return 1;
+    float mx = 0, my = 0;
+    for (int i = 0; i < mmNPts; i++) { mx += mmPts[i].x; my += mmPts[i].y; }
+    mx /= mmNPts; my /= mmNPts;
+    float sxx = 0, syy = 0, sxy = 0;
+    for (int i = 0; i < mmNPts; i++) {
+        float dx = mmPts[i].x - mx, dy = mmPts[i].y - my;
+        sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+    }
+    float a = 0.5f * atan2f(2 * sxy, sxx - syy), ux = cosf(a), uy = sinf(a);
+    float lo = FLT_MAX, hi = -FLT_MAX, spread = 0;
+    for (int i = 0; i < mmNPts; i++) {
+        float dx = mmPts[i].x - mx, dy = mmPts[i].y - my, along = dx * ux + dy * uy;
+        lo = fminf(lo, along); hi = fmaxf(hi, along);
+        spread = fmaxf(spread, fabsf(-dx * uy + dy * ux));
+    }
+    return spread < mmLineSpread * (hi - lo);
+}
 static const double scrollQuiet = 0.4;      // no system scroll this long before a tap, or it's part of scrolling
 // A lift shorter than mergeGap that lands within mergeDist of where it left is contact loss, not a new stroke.
 // Recorded deliberate re-placements always landed 0.1-0.35 away; slips came back 0.01-0.02 away.
@@ -4308,45 +4414,112 @@ static void mmLog(const char *what, const char *letter, float score) {
 static const float pdollarAspectX = 10.0f / 15.0f;
 static pthread_mutex_t mmLock = PTHREAD_MUTEX_INITIALIZER;
 
+// What the drawing so far would fire if it ended now. *why is set when it wouldn't fire (letter may still say what it
+// looked like, for the log). No side effects: the live preview and the final result both come from here, so they agree.
+static const char *mmRecognizeNow(const char **whyOut, float *scoreOut) {
+    mmFromBuiltin = 0;
+    const char *letter = NULL, *why = NULL;
+    float score = 0;
+    // One stroke, three tries in order (none for a near-straight line: that's a scroll or a flick, never a letter).
+    // 1. Your trained letter, if it's a strong match and close to the best overall.
+    // 2. A built-in capital, judged only against other built-ins: a close match with a clear lead, since a scroll can
+    //    look like a C or an L. A weak trained letter can't block it (a clear C was read as a 1.44 trained O, 2026-11-24).
+    // 3. Your trained letter on a looser match, as before.
+    int line = mmStrokes == 1 && mmLineLike();
+    const char *mine = NULL;
+    float mineScore = FLT_MAX, any = FLT_MAX;
+    if (mmStrokes == 1 && !line && pdollarRecognize(mmPts, mmNPts, FLT_MAX, &any, 0)) {
+        mine = pdollarBestUser;
+        mineScore = pdollarBestUserScore;
+    }
+    if (mine && mineScore <= yoursCloseCallMax && mineScore <= any + yoursTieBand) {
+        letter = mine;
+        score = mineScore;
+    } else if (mmStrokes == 1 && !line && (letter = pdollarRecognize(mmPts, mmNPts, oneStrokeMaxScore, &score, 2)) &&
+               pdollarRunnerUp - score >= oneStrokeMargin) {
+        mmFromBuiltin = 1; // logged as "fired-builtin": the case a scroll could set off
+    } else if (mine && mineScore <= personalMaxScore) {
+        letter = mine;
+        score = mineScore;
+    } else if (mmStrokes == 1 && pdollarUserTemplateCount() > 0) {
+        letter = NULL;
+        // You've trained your letters, so a one-stroke drawing that matches none of them isn't a letter.
+        // (Jitouch's built-in shapes fired on casual scrolls: "Up-Left" and a one-stroke "F", log of 2026-11-10.)
+        why = "rejected-no-personal-match";
+    } else if (mmStrokes == 1) {
+        letter = finalizeStep(mmFirst[0], mmFirst[1], mmLast[0], mmLast[1], mmTop, mmBottom, mmLeft, mmRight);
+        for (int i = 0; mmScrollLike[i]; i++)
+            if (strcmp(letter, mmScrollLike[i]) == 0) why = "rejected-scroll-like";
+    } else if (mmParallelFlicks()) {
+        why = "rejected-parallel-flicks";
+    } else {
+        letter = pdollarRecognize(mmPts, mmNPts, pdollarMaxScore, &score, 0);
+        if (!letter) why = "rejected-no-match";
+    }
+    if (!why && (!letter || strcmp(letter, "?") == 0)) why = "rejected-no-match";
+    *whyOut = why;
+    *scoreOut = score;
+    return letter;
+}
+// Show under the ink the letter that would fire right now, or nothing. Call with mmLock held.
+static char mmLastPreview[24]; // the last preview shown (tests compare it with what fired)
+static void mmPreview(void) {
+    const char *why;
+    float score;
+    const char *letter = mmRecognizeNow(&why, &score);
+    snprintf(mmLastPreview, sizeof mmLastPreview, "%s", why || !letter ? "" : letter);
+    NSString *text = [[NSString alloc] initWithUTF8String:mmLastPreview];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [gestureWindow setHintText:[text UTF8String]];
+        [text release];
+    });
+}
+
+static const double mmFiredShowTime = 0.7; // seconds the fired letter stays up. ponytail: knob
 static void mmEnd(int recognize) { // call with mmLock held
+    NSString *fired = nil; // the letter that actually ran, shown under the ink for a moment
     if (recognize && mmShown) {
-        const char *letter = NULL, *why = NULL;
-        float score = 0;
-        if (mmStrokes == 1 && (letter = pdollarRecognize(mmPts, mmNPts, personalMaxScore, &score, 1))) {
-            // matched your own trained handwriting closely: that wins over the built-in direction templates
-        } else if (mmStrokes == 1 && pdollarUserTemplateCount() > 0) {
-            // You've trained your letters, so a one-stroke drawing that matches none of them isn't a letter.
-            // (Jitouch's built-in shapes fired on casual scrolls: "Up-Left" and a one-stroke "F", log of 2026-11-10.)
-            why = "rejected-no-personal-match";
-        } else if (mmStrokes == 1) {
-            letter = finalizeStep(mmFirst[0], mmFirst[1], mmLast[0], mmLast[1], mmTop, mmBottom, mmLeft, mmRight);
-            for (int i = 0; mmScrollLike[i]; i++)
-                if (strcmp(letter, mmScrollLike[i]) == 0) why = "rejected-scroll-like";
-        } else if (mmParallelFlicks()) {
-            why = "rejected-parallel-flicks";
-        } else {
-            letter = pdollarRecognize(mmPts, mmNPts, pdollarMaxScore, &score, 0);
-            if (!letter) why = "rejected-no-match";
+        const char *why;
+        float score;
+        const char *letter = mmRecognizeNow(&why, &score);
+        mmLog(why ? why : mmFromBuiltin ? "fired-builtin" : "fired", letter, score);
+        { // the drawing itself, in letters.txt's "x,y,stroke" form, so a misread can be replayed (tests/pd_eval.m)
+            char line[1400];
+            int len = snprintf(line, sizeof line, "points:"), step = mmNPts > 80 ? mmNPts / 80 + 1 : 1;
+            for (int i = 0; i < mmNPts && len < (int)sizeof line - 24; i += step)
+                len += snprintf(line + len, sizeof line - len, " %.4f,%.4f,%d", mmPts[i].x, mmPts[i].y, mmPts[i].stroke);
+            mmLogLine(line);
         }
-        if (!why && (!letter || strcmp(letter, "?") == 0)) why = "rejected-no-match";
-        mmLog(why ? why : "fired", letter, score);
         if (!why) {
             NSString *commandString = [[NSString alloc] initWithUTF8String:letter];
             dispatchCommand(commandString, CHARRECOGNITION);
-            [commandString release];
+            fired = commandString; // released after it's shown
         }
     }
+    mmGen++;
     if (mmShown) {
+        int gen = mmGen;
         dispatch_async(dispatch_get_main_queue(), ^{
-            [gestureWindow clear];
-            [gestureWindow orderOut:nil];
+            if (fired) [gestureWindow setHintText:[fired UTF8String]];
         });
+        // Leave the ink and the letter up briefly, unless a new drawing has started since (mmGen moved on).
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((fired ? mmFiredShowTime : 0) * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (gen == mmGen) {
+                [gestureWindow setHintText:""];
+                [gestureWindow clear];
+                [gestureWindow orderOut:nil];
+            }
+            [fired release];
+        });
+    } else {
+        [fired release];
     }
     mmShown = 0;
     cancelRecognition = 0;
     isMMFingerRecognizing = 0;
+    mmHideCursor(0);
     mmStep = 0;
-    mmGen++;
 }
 
 #ifdef JITOUCH_TEST
@@ -4435,6 +4608,8 @@ static void mmDragAbandon(void) { // call with mmLock held
 // Let go of a finger-drag now (quit, SIGTERM, Jitouch turned off). Any thread; mmLock must NOT be held.
 void mmForceRelease(void) {
     pthread_mutex_lock(&mmLock);
+    mmStripPending = 0; // never leave scrolling blocked when the recognizer stops running
+    mmHideCursor(0);
     if (mmDragging) {
         mmLiftPtr = mmPointer();
         mmLogLine("drag: released because Jitouch is quitting or turned off");
@@ -4467,6 +4642,114 @@ static void mmDragWatchdog(int gen) {
 #endif
 }
 
+// One fine volume step: a volume key with Option+Shift held, which macOS treats as a quarter step (checked live
+// 2026-11-11: 81 -> 83 -> 84, back to 81). Same events as KeyUtility's simulateSpecialKey, plus those modifiers.
+static void mmSpecialKey(int key) { // a media key with Option+Shift: macOS then moves in quarter steps
+    @autoreleasepool {
+        NSEventModifierFlags mods = NSEventModifierFlagOption | NSEventModifierFlagShift;
+        for (int state = 0xa; state <= 0xb; state++) { // key down, then key up
+            NSEvent *e = [NSEvent otherEventWithType:NSEventTypeSystemDefined location:NSZeroPoint
+                                       modifierFlags:(state << 8) | mods timestamp:0 windowNumber:0 context:NULL
+                                             subtype:8 data1:(key << 16) | (state << 8) data2:-1];
+            CGEventRef c = [e CGEvent];
+            CGEventSetFlags(c, (CGEventFlags)mods);
+            CGEventPost(kCGSessionEventTap, c);
+        }
+    }
+}
+static void mmVolumeKey(int up) { mmSpecialKey(up ? NX_KEYTYPE_SOUND_UP : NX_KEYTYPE_SOUND_DOWN); }
+
+// Stepped edge sliders (mmEdgeMode 2 and up): one step per mmEdgeStepSize of travel. plus = slide right on the
+// front and back edges, forward on the sides. Commands that fire once belong on letters; edges only move things.
+static const float mmEdgeStepSize[] = {0, 0, 0.03f, 0.12f, 0.10f, 0.06f, 0.25f}; // ponytail: knobs, per mode
+static void mmEdgeStep(int mode, int plus) {
+#ifdef JITOUCH_TEST
+    static const char *names[] = {"", "", "Brightness", "Tab", "Zoom", "Redo", "Desktop"};
+    jtTestRecognized = [[NSString alloc] initWithFormat:@"%s %s", names[mode], plus ? "+" : "-"];
+    return;
+#endif
+    switch (mode) {
+    case 2: mmSpecialKey(plus ? NX_KEYTYPE_BRIGHTNESS_UP : NX_KEYTYPE_BRIGHTNESS_DOWN); break;
+    case 3: [keyUtil simulateKeyCode:48 ShftDown:!plus CtrlDown:YES AltDown:NO CmdDown:NO]; break;          // Ctrl-Tab, Ctrl-Shift-Tab
+    case 4: [keyUtil simulateKeyCode:(plus ? 24 : 27) ShftDown:NO CtrlDown:NO AltDown:NO CmdDown:YES]; break; // Cmd =, Cmd -
+    case 5: [keyUtil simulateKeyCode:6 ShftDown:plus CtrlDown:NO AltDown:NO CmdDown:YES]; break;             // Cmd Shift Z, Cmd Z
+    case 6: [keyUtil simulateKeyCode:(plus ? 124 : 123) ShftDown:NO CtrlDown:YES AltDown:NO CmdDown:NO]; break; // Ctrl arrow: desktops
+    }
+}
+
+// Smooth volume: set the default output's main volume directly, a Float32 from 0 to 1 (AudioHardwareService.h,
+// kAudioHardwareServiceDeviceProperty_VirtualMainVolume). Measured 0.5-0.8 ms per set on eqMac (2026-11-11), so it
+// can follow the finger every touch frame instead of in key-sized jumps. A device that can't be set uses the keys.
+static AudioObjectID mmVolDev;
+static AudioObjectPropertyAddress mmVolAddr = {kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
+                                               kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain};
+static AudioObjectPropertyAddress mmMuteAddr = {kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput,
+                                                kAudioObjectPropertyElementMain};
+static int mmVolBegin(float *now, int *muted) { // 1 if the volume can be set directly; *now = current level
+#ifdef JITOUCH_TEST
+    *now = 0.5f; *muted = 0;
+    return 1;
+#endif
+    AudioObjectPropertyAddress def = {kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
+                                      kAudioObjectPropertyElementMain};
+    UInt32 sz = sizeof mmVolDev;
+    Boolean settable = 0;
+    Float32 v = 0;
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &def, 0, NULL, &sz, &mmVolDev) ||
+        !AudioObjectHasProperty(mmVolDev, &mmVolAddr) ||
+        AudioObjectIsPropertySettable(mmVolDev, &mmVolAddr, &settable) || !settable)
+        return 0;
+    sz = sizeof v;
+    if (AudioObjectGetPropertyData(mmVolDev, &mmVolAddr, 0, NULL, &sz, &v)) return 0;
+    UInt32 m = 0;
+    sz = sizeof m;
+    *muted = AudioObjectHasProperty(mmVolDev, &mmMuteAddr) &&
+             !AudioObjectGetPropertyData(mmVolDev, &mmMuteAddr, 0, NULL, &sz, &m) && m;
+    *now = v;
+    return 1;
+}
+static void mmVolSet(float v, int unmute) { // a serial queue keeps audio calls off the touch thread; newest value wins
+#ifdef JITOUCH_TEST
+    return;
+#endif
+    static dispatch_queue_t q;
+    static volatile float latest;
+    static volatile int queued;
+    if (!q) q = dispatch_queue_create("jitouch.volume", DISPATCH_QUEUE_SERIAL);
+    latest = v;
+    if (unmute)
+        dispatch_async(q, ^{ UInt32 m = 0; AudioObjectSetPropertyData(mmVolDev, &mmMuteAddr, 0, NULL, sizeof m, &m); });
+    if (queued) return;
+    queued = 1;
+    dispatch_async(q, ^{
+        queued = 0;
+        Float32 x = latest;
+        AudioObjectSetPropertyData(mmVolDev, &mmVolAddr, 0, NULL, sizeof x, &x);
+    });
+}
+static void mmVolLabel(int percent, int show, int hide) { // "Volume 57%" over the mouse, on the main thread
+#ifndef JITOUCH_TEST
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (show) {
+            [gestureWindow clear];
+            [gestureWindow setUpWindowForMouseSurface];
+            [gestureWindow display];
+            [gestureWindow setLevel:NSScreenSaverWindowLevel];
+            [gestureWindow makeKeyAndOrderFront:nil];
+        }
+        if (hide) {
+            [gestureWindow setHintText: emptyString];
+            [gestureWindow clear];
+            [gestureWindow orderOut:nil];
+        } else {
+            char b[20];
+            snprintf(b, sizeof b, "Volume %d%%", percent);
+            [gestureWindow setHintText: b];
+        }
+    });
+#endif
+}
+
 static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double timestamp) {
     // ponytail: calibration knobs. The mouse surface is narrower than it is long, so letters can read squished;
     // raise mmAspect above 1 if wide letters (M, W) misrecognize. tapMoveMax = how far a "tap" may wander.
@@ -4494,11 +4777,25 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
     static double preMoveGap; // how long the pointer had been still when the finger landed
     static CGPoint touchPtr;
     static const float dst = 0.0002f;
+    static const float drawDst = 0.00005f; // ink and letter points every ~0.7% of the mouse (was 1.4%): smoother curves. ponytail: knob
 
     static int lastN = 0, drawId = -1, tapClicked = 0, moved = 0;
+    // Volume strip: a touch that lands on the very front of the mouse (y >= volZoneY) and slides sideways sets the
+    // volume, one volume-key step per volStep of travel. Real use never reached it: 63 recorded landings top out at
+    // y 0.78, all 2,269 recorded frames at 0.80, trained letters at 0.69. Taps, holds and drags there stay normal.
+    // ponytail: knobs. volStart must stay under the tap wobble limit (sqrt(tapMoveMax) = 0.028) to be seen first.
+    static const float volZoneY = mmEdgeFrontY, volStart = 0.025f, volStep = 0.02f; // 0.02: a full-width slide ~ 50 quarter steps
+    static float volX;
+    static int slideEdge; // the edge of the current slide (mmStep 7)
+    // Smooth path: the level follows the finger (volGain = level change per full sensor width, from the level at
+    // the start), eased each frame by volEase so sensor jitter never shows. ponytail: knobs.
+    // volMaxRate caps one frame's change: frames come ~15 ms apart (recordings), so 0.04 still sweeps 0-100% in ~0.4 s.
+    static const float volGain = 1.0f, volEase = 0.45f, volMaxRate = 0.04f;
+    static float volStartLevel, volSent, volTarget;
+    static int volDirect, volMuted, volPercent;
     static double downT;
     static double tapStartWall;
-    static double t0, hintTime = -1;
+    static double t0, pauseT = -1; // pauseT: when the drawing finger last moved, for the live preview
     static float tapPos[2], lpos[2];
 
     pthread_mutex_lock(&mmLock);
@@ -4565,10 +4862,35 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
         } else if (nFingers == 1 && !clicked && !scrolling && oneTouchOK && timestamp - t0 <= oneTouchWindow &&
                    hypot(mmPointer().x - touchPtr.x, mmPointer().y - touchPtr.y) > tapDragPx) {
             startDrag = 1; // landed on a still mouse, then the mouse moved right away
+        } else if (nFingers == 1 && !clicked && (slideEdge = mmEdgeAt(tapPos[0], tapPos[1])) >= 0 && mmEdgeMode[slideEdge] &&
+                   fabsf(mmAlong(slideEdge, x, y) - mmAlong(slideEdge, tapPos[0], tapPos[1])) >= volStart &&
+                   fabsf(mmAlong(slideEdge, x, y) - mmAlong(slideEdge, tapPos[0], tapPos[1])) >=
+                   2 * fabsf(mmAcross(slideEdge, x, y) - mmAcross(slideEdge, tapPos[0], tapPos[1]))) {
+            mmStep = 7; // edge slide: volume or the edge's commands until the finger lifts
+            isMMFingerRecognizing = 1; // swallows the slide's scroll events and pauses other mouse gestures
+            volX = mmAlong(slideEdge, tapPos[0], tapPos[1]);
+            drawId = f->identifier;
+            if (mmEdgeMode[slideEdge] >= 2) {
+                char line[80]; snprintf(line, sizeof line, "edge: %s slider %d", [mmEdgeName[slideEdge] UTF8String], mmEdgeMode[slideEdge]); mmLogLine(line);
+            } else {
+            mmVolSteps = 0;
+            mmVolMaxJump = 0;
+            volDirect = mmVolBegin(&volStartLevel, &volMuted);
+            mmVolLevel = volSent = volTarget = volStartLevel;
+            volPercent = (int)lroundf(volStartLevel * 100);
+            if (volDirect) mmVolLabel(volPercent, 1, 0);
+            { char line[100]; snprintf(line, sizeof line, "volume: sliding on %s (landed at y=%.2f)", [mmEdgeName[slideEdge] UTF8String], tapPos[1]); mmLogLine(line); }
+            }
         } else if (nFingers != 1 || clicked || scrolling || lenSqr(tapPos[0], tapPos[1], x, y) > tapMoveMax) {
 #ifdef JITOUCH_TRACE
             printf("%.3f   not ours: touches=%d held=%.3fs moved2=%.4f (max %.4f)\n", timestamp, nFingers, timestamp - t0, lenSqr(tapPos[0], tapPos[1], x, y), tapMoveMax);
 #endif
+            if (nFingers == 1 && !clicked && tapPos[1] >= 0.70f && tapPos[1] < volZoneY &&
+                fabsf(x - tapPos[0]) >= 2 * fabsf(y - tapPos[1])) { // a sideways slide just below the strip
+                char line[120];
+                snprintf(line, sizeof line, "volume-missed: sideways slide landed at y=%.2f (strip starts at %.2f)", tapPos[1], volZoneY);
+                mmLogLine(line);
+            }
             mmStep = 0; // moved before arming (a scroll), another finger, or a click
         } else if ((!oneTouchOK || timestamp - t0 > oneTouchWindow) &&
                    hypot(mmPointer().x - touchPtr.x, mmPointer().y - touchPtr.y) > pointerStill) {
@@ -4600,6 +4922,7 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
                 mmStrokes = 0;
                 mmNPts = 0;
                 isMMFingerRecognizing = 1; // blocks scroll and other mouse gestures while drawing
+                mmHideCursor(1);
                 clearStep();
                 mmFirst[0] = mmLast[0] = x;
                 mmFirst[1] = mmLast[1] = y;
@@ -4607,7 +4930,7 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
                 mmShown = 1; // the dot that says "draw now"
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [gestureWindow setHintText: emptyString];
-                    [gestureWindow setUpWindowForMouseSurface];
+                    [gestureWindow setUpWindowForMouseSurfaceAtX:x Y:y]; // drawing starts under the pointer
                     [gestureWindow display];
                     [gestureWindow setLevel:NSScreenSaverWindowLevel];
                     [gestureWindow makeKeyAndOrderFront:nil];
@@ -4622,11 +4945,10 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
             mmGen++; // cancels a pending end-of-letter timer
             mmStrokes++;
             downT = timestamp;
-            hintTime = -1;
             drawId = f->identifier;
             lpos[0] = x;
             lpos[1] = y;
-            if (mmNPts < MM_MAX_POINTS) mmPts[mmNPts++] = (PDPoint){x * pdollarAspectX, y, mmStrokes};
+            if (mmNPts < MM_MAX_POINTS) { mmPtSize[mmNPts] = f->size; mmPts[mmNPts++] = (PDPoint){x * pdollarAspectX, y, mmStrokes}; }
             if (mmShown)
                 dispatch_async(dispatch_get_main_queue(), ^{ [gestureWindow addPointX:x Y:y]; });
         } else if (nFingers > 1) {
@@ -4650,6 +4972,60 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
             mmStep = 0; // the finger slid while the mouse stayed put: a scroll
         } else if (timestamp - t0 > tapMaxHold) {
             mmStep = 1; // too long for a tap: carry on as a first touch, so it can still arm a letter
+        }
+    } else if (mmStep == 7) { // edge slide: volume, or the edge's commands
+        float along = mmAlong(slideEdge, x, y), along0 = mmAlong(slideEdge, tapPos[0], tapPos[1]);
+        if (nFingers != 1 || mmButtonDown()) { // lifted, a second finger, or a real click: done
+            mmStep = 0;
+            isMMFingerRecognizing = 0;
+            drawId = -1;
+            if (mmEdgeMode[slideEdge] >= 2) {
+                mmLogLine("edge: done");
+            } else if (volDirect) {
+                mmVolLabel(0, 0, 1);
+                mmVolLevel = volTarget; // lifted before the easing caught up: finish where the finger said
+                if (mmVolLevel != volSent) mmVolSet(mmVolLevel, volMuted && mmVolLevel > volStartLevel + 0.01f);
+            }
+            { char line[120];
+              snprintf(line, sizeof line, "volume: done (%s, %d updates, %.0f%% -> %.0f%%)", volDirect ? "smooth" : "keys",
+                       mmVolSteps, volStartLevel * 100, mmVolLevel * 100);
+              mmLogLine(line); }
+        } else if (f && mmEdgeMode[slideEdge] >= 2) {
+            float step = mmEdgeStepSize[mmEdgeMode[slideEdge]];
+            while (fabsf(along - volX) >= step) {
+                int plus = along > volX;
+                volX += plus ? step : -step;
+                mmEdgeStep(mmEdgeMode[slideEdge], plus);
+            }
+        } else if (f && volDirect) {
+            float target = volTarget = fminf(1, fmaxf(0, volStartLevel + (along - along0) * volGain));
+            float next = mmVolLevel + fminf(volMaxRate, fmaxf(-volMaxRate, (target - mmVolLevel) * volEase));
+            if (fabsf(target - next) < 0.001f) next = target;
+            if (fabsf(next - mmVolLevel) > mmVolMaxJump) mmVolMaxJump = fabsf(next - mmVolLevel);
+            mmVolLevel = next;
+            if (fabsf(mmVolLevel - volSent) >= 0.002f) { // ~0.2%: below that nobody can hear the change
+                int unmute = volMuted && mmVolLevel > volStartLevel + 0.01f;
+                if (unmute) volMuted = 0;
+                mmVolSet(mmVolLevel, unmute);
+                volSent = mmVolLevel;
+                mmVolSteps++;
+            }
+            int pct = (int)lroundf(mmVolLevel * 100);
+            if (pct != volPercent) { volPercent = pct; mmVolLabel(pct, 0, 0); }
+#ifdef JITOUCH_TEST
+            if (mmVolLevel != volStartLevel) jtTestRecognized = mmVolLevel > volStartLevel ? @"Volume Up" : @"Volume Down";
+#endif
+        } else if (f) { // fallback: fine volume keys (a device whose volume can't be set directly)
+            while (fabsf(along - volX) >= volStep) {
+                int up = along > volX;
+                volX += up ? volStep : -volStep;
+                mmVolSteps++;
+#ifdef JITOUCH_TEST
+                jtTestRecognized = up ? @"Volume Up" : @"Volume Down";
+#else
+                mmVolumeKey(up);
+#endif
+            }
         }
     } else if (mmStep == 5) { // dragging: the button comes up the instant the drag finger lifts, where the cursor is.
         // Posting the up at an older point snaps the cursor back there (log 16:04: released at (1725,135) with the
@@ -4676,6 +5052,13 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
             } else {
                 mmStep = 4;
                 t0 = timestamp;
+                int cut = mmTrimLift(mmStrokes);
+                if (cut && mmStrokes == 1 && mmNPts > 0) { // the one-stroke reader uses the end point too
+                    mmLast[0] = mmPts[mmNPts - 1].x / pdollarAspectX;
+                    mmLast[1] = mmPts[mmNPts - 1].y;
+                }
+                if (cut && mmShown) dispatch_async(dispatch_get_main_queue(), ^{ [gestureWindow dropLastPoints:cut]; });
+                mmPreview(); // lifted: show what fires unless another stroke follows
                 int gen = ++mmGen;
 #ifndef JITOUCH_TEST
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(strokeGap * NSEC_PER_SEC)),
@@ -4697,27 +5080,24 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
                 if (x > mmRight) mmRight = x;
                 if (x < mmLeft) mmLeft = x;
             }
-            if (lenSqr(lpos[0], lpos[1], x, y) > dst) {
+            // A frame where the finger is already lifting off (BreakTouch) is never drawn: its center has slid.
+            if ((!f || f->state == MTTouchStateTouching) && lenSqr(lpos[0], lpos[1], x, y) > drawDst) {
                 if (mmStrokes == 1) {
                     advanceStep(atan2(y - lpos[1], x - lpos[0]));
                     mmLast[0] = x;
                     mmLast[1] = y;
                 }
-                if (mmNPts < MM_MAX_POINTS) mmPts[mmNPts++] = (PDPoint){x * pdollarAspectX, y, mmStrokes};
+                if (mmNPts < MM_MAX_POINTS) { mmPtSize[mmNPts] = f ? f->size : 1; mmPts[mmNPts++] = (PDPoint){x * pdollarAspectX, y, mmStrokes}; }
                 moved = 1;
                 lpos[0] = x;
                 lpos[1] = y;
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    [gestureWindow setHintText: emptyString];
                     [gestureWindow addPointX:x Y:y];
                 });
-                hintTime = mmStrokes == 1 ? timestamp : -1; // hint only for one-stroke letters
-            } else if (hintTime > 0 && timestamp - hintTime >= hintWaitTime) {
-                const char *hint = finalizeStep(mmFirst[0], mmFirst[1], mmLast[0], mmLast[1], mmTop, mmBottom, mmLeft, mmRight);
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [gestureWindow setHintText: hint];
-                });
-                hintTime = -1;
+                pauseT = timestamp;
+            } else if (pauseT > 0 && timestamp - pauseT >= hintWaitTime) {
+                mmPreview(); // finger paused: show what would fire if it lifted now
+                pauseT = -1;
             }
         }
     }
@@ -4733,6 +5113,7 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
         // Press where the pointer is now: posting at the older touch point yanks the real cursor back there.
         mmPost(kCGEventLeftMouseDown, mmPointer(), kCGMouseButtonLeft, 1);
 #endif
+        mmDragScrollSum = 0;
         mmDragging = 1; // only after the press is out, so no drag move can precede it
         { char line[120];
           snprintf(line, sizeof line, "drag: mouse down (mouse still %.0f ms before the touch)", preMoveGap * 1000);
@@ -4755,6 +5136,7 @@ static void magicMouseFingerRecognizer(const Finger *data, int nFingers, double 
         tapPos[0] = x;
         tapPos[1] = y;
     }
+    { int e = mmEdgeAt(tapPos[0], tapPos[1]); mmStripPending = mmStep == 1 && e >= 0 && mmEdgeMode[e]; } // undecided edge touch: its scroll waits
     lastN = nFingers;
     pthread_mutex_unlock(&mmLock);
 }

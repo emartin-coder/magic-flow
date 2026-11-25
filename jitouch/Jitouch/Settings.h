@@ -36,6 +36,9 @@ extern int enHanded;
 //Magic Mouse
 extern int enMMAll;
 extern int enMMHanded;
+// Magic Mouse edge sliders, indexed front, back, left, right: 0 off, 1 volume, 2 brightness, 3 tabs,
+// 4 zoom, 5 undo/redo, 6 desktops (mmEdgeStep in Gesture.m).
+extern int mmEdgeMode[4];
 
 //Character Recognition
 extern int enCharRegTP;
