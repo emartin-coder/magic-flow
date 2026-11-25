@@ -4,7 +4,7 @@ Draw letters with your fingertip on the top of an Apple Magic Mouse, and each le
 
 ![Draw F with your fingertip on the mouse, and Finder opens](docs/demo.gif)
 
-*A real fingertip F recorded from the Magic Mouse's touch sensor and replayed. The right panel is zoomed. Recorded with the earlier tap-to-start version: letters now start with a short still hold.*
+*A real fingertip F recorded from the Magic Mouse's touch sensor and replayed. The right panel is zoomed. The strokes are real; the still hold before them is drawn in, because the recording predates hold-to-start.*
 
 Magic Flow is a fork of [Jitouch](https://github.com/JitouchApp/Jitouch) (it was called Jitouch FingerDraw until November 2026). Jitouch already recognizes letters on the Magic Mouse, but you draw them by moving the whole mouse. Magic Flow reads your fingertip on the mouse's touch surface instead.
 
@@ -52,7 +52,14 @@ To uninstall, quit Magic Flow from its menu bar icon, delete both apps from `/Ap
 
 ### Download
 
-[Releases](https://github.com/emartin-coder/magic-flow/releases) has an installer (`Jitouch-FingerDraw-<version>.pkg`) for Apple silicon Macs, but it predates the edge sliders and Magic Flow Settings: it installs the original Jitouch settings panel instead. Build from source for the current version.
+[Releases](https://github.com/emartin-coder/magic-flow/releases) has an installer, `Magic-Flow-<version>.pkg`, for Apple silicon Macs. It installs the same two apps as a source build.
+
+1. Open the installer. It isn't signed with an Apple Developer ID yet, so macOS blocks it the first time. Go to System Settings > Privacy & Security, click **Open Anyway** next to the blocked installer (it's offered for about an hour), and enter your password ([Apple's steps](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac)).
+2. Open **Magic Flow** from Applications, then allow it under System Settings > Privacy & Security > Accessibility.
+3. Add **Magic Flow** under System Settings > General > Login Items, so it starts when you log in.
+4. Open **Magic Flow Settings** and turn on **Draw letters on the Magic Mouse** on the Letters tab.
+
+Upgrading from 0.2.0 or earlier: those installed a Jitouch settings panel in `/Library/PreferencePanes`. Delete `Jitouch.prefPane` there so only one copy runs.
 
 ## Teach it your handwriting (optional)
 
@@ -65,7 +72,7 @@ Your examples are saved to `~/Library/Application Support/Jitouch/letters.txt`, 
 ## Limitations
 
 - **Private Apple framework.** Touch data comes from Apple's private MultitouchSupport framework, so a macOS update can break it, and it can't be distributed through the Mac App Store.
-- **Apple silicon only, and not notarized.** You build it yourself.
+- **Apple silicon only, and not notarized.** macOS asks you to allow the installer once.
 - **Tuned on one person.** The timing and matching cutoffs come from one person's hand and one mouse. The scroll check in `tests/run.sh` only has data if you record your own scrolling into `tests/fixtures/negatives/` (`mkdir -p tests/fixtures/negatives && build/touch_probe 120 > tests/fixtures/negatives/my-scrolling.log`). If something misfires, the gesture log says why.
 - **Tuning values are constants** in `jitouch/Jitouch/Gesture.m` (marked `ponytail: knob`), such as the edge slider step sizes in `mmEdgeStepSize`.
 - **Internal names stay Jitouch.** The app keeps Jitouch's bundle ID (`com.jitouch.Jitouch`), settings file and log name, so settings carry over from Jitouch.
