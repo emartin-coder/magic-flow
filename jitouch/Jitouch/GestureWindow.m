@@ -110,6 +110,9 @@ static float magicMouseHeight = 800;
 - (void)breakStroke {
     [gestureView breakStroke];
 }
+- (void)dropLastPoints:(int)n {
+    [gestureView dropLastPoints:n];
+}
 
 - (void)clear {
     [gestureView clear];

@@ -7,21 +7,6 @@
 
 #import "GestureView.h"
 
-// A chubby five-point star with rounded tips (the Warp Star's shape): fat inner radius, arcs at every corner.
-static CGPathRef warpStarPath(NSPoint c, float R, float tilt) {
-    CGPoint v[10];
-    for (int j = 0; j < 10; j++) {
-        float r = (j % 2) ? R * 0.55f : R, a = M_PI_2 + tilt + j * M_PI / 5;
-        v[j] = CGPointMake(c.x + r * cosf(a), c.y + r * sinf(a));
-    }
-    CGMutablePathRef p = CGPathCreateMutable();
-    CGPathMoveToPoint(p, NULL, (v[9].x + v[0].x) / 2, (v[9].y + v[0].y) / 2);
-    for (int j = 0; j < 10; j++)
-        CGPathAddArcToPoint(p, NULL, v[j].x, v[j].y, (v[j].x + v[(j + 1) % 10].x) / 2, (v[j].y + v[(j + 1) % 10].y) / 2, (j % 2) ? R * 0.12f : R * 0.22f);
-    CGPathCloseSubpath(p);
-    return p;
-}
-
 @implementation GestureView
 
 - (id)initWithFrame:(NSRect)frame {
@@ -39,95 +24,128 @@ static CGPathRef warpStarPath(NSPoint c, float R, float tilt) {
     CGContextRef context = [[NSGraphicsContext currentContext]graphicsPort];
 
     if ([points count] > 0) {
-        // Warp Star, per the official art (WiKirby): a chubby yellow five-point star with a thick dark outline and
-        // white shine spots, wobbling while it glows, shedding small pale-yellow stars and dots behind it.
-        float minX = 10000, minY = 10000, walked = 0;
-        BOOL penUp = YES, any = NO;
+        // Chrome ink, after polished sterling silver (Chrome Hearts): a dark edge, contrasting bands so the line reads
+        // as polished sterling, rope-twisted below, a white highlight off-center, and a glint sliding along it.
+        float minX = 10000, minY = 10000, maxX = -10000, walked = 0;
+        BOOL penUp = YES;
         NSPoint last = NSZeroPoint;
+        CGMutablePathRef line = CGPathCreateMutable();
         for (NSUInteger i = 0; i < [points count]; i++) {
             NSPoint p = [[points objectAtIndex:i] pointValue];
             if (isnan(p.x)) { penUp = YES; continue; }
-            if (!penUp) walked += hypotf(p.x - last.x, p.y - last.y);
+            if (penUp) CGPathMoveToPoint(line, NULL, p.x, p.y);
+            else { CGPathAddLineToPoint(line, NULL, p.x, p.y); walked += hypotf(p.x - last.x, p.y - last.y); }
             penUp = NO;
-            any = YES;
             last = p;
             if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
             if (p.y < minY) minY = p.y;
         }
 
-        // Particles every 9 px: alternate little stars and dots, bigger and brighter toward the Warp Star,
-        // each twinkling on its own beat, nudged off the line so it reads as a spray.
-        penUp = YES;
-        float along = 0, next = 0;
-        int k = 0;
-        NSPoint prev = NSZeroPoint;
-        for (NSUInteger i = 0; i < [points count]; i++) {
-            NSPoint p = [[points objectAtIndex:i] pointValue];
-            if (isnan(p.x)) { penUp = YES; continue; }
-            if (!penUp) along += hypotf(p.x - prev.x, p.y - prev.y);
-            penUp = NO;
-            prev = p;
-            if (along < next) continue;
-            next = along + 9;
-            k++;
-            float fresh = walked > 0 ? along / walked : 1; // 0 at the tail, 1 at the star
-            float tw = 0.75f + 0.25f * sinf(phase * 6 + k * 2.3f);
-            float r = (2.5f + 4.5f * fresh) * tw * ((k % 3 == 0) ? 1.4f : 1.0f);
-            NSPoint c = NSMakePoint(p.x + 4 * sinf(k * 1.9f + phase * 2), p.y + 4 * cosf(k * 2.7f + phase * 2));
-            CGContextSetRGBFillColor(context, 1, 0.97, 0.62, 0.55 + 0.45 * fresh);
-            CGContextSetRGBStrokeColor(context, 1, 0.85, 0.25, 0.55 + 0.45 * fresh);
-            CGContextSetLineWidth(context, 1.0);
-            if (k % 2) {
-                CGPathRef star = warpStarPath(c, r * 1.4f, sinf(k) * 0.5f);
-                CGContextAddPath(context, star);
-                CGPathRelease(star);
-            } else {
-                CGContextAddEllipseInRect(context, CGRectMake(c.x - r * 0.6f, c.y - r * 0.6f, r * 1.2f, r * 1.2f));
-            }
-            CGContextDrawPath(context, kCGPathFillStroke);
-        }
-
-        if (any) {
-            // Glow, then the star: outline, yellow body with a lighter top, two shine spots.
-            float R = 24, tilt = -0.25f + 0.2f * sinf(phase * 4); // wobble back and forth
-            CGContextSaveGState(context);
-            CGContextSetShadowWithColor(context, CGSizeZero, 14, [[NSColor colorWithRed:1 green:0.95 blue:0.5 alpha:0.9] CGColor]);
-            CGPathRef star = warpStarPath(last, R, tilt);
-            CGContextAddPath(context, star);
-            CGContextSetRGBFillColor(context, 1, 0.84, 0.05, 1);
-            CGContextFillPath(context);
-            CGContextRestoreGState(context);
-
-            CGContextSaveGState(context);
-            CGContextAddPath(context, star);
-            CGContextClip(context);
-            CGFloat cols[] = {1, 0.97, 0.55, 1,   1, 0.84, 0.05, 1,   0.95, 0.68, 0.0, 1};
-            CGFloat locs[] = {0, 0.55, 1};
-            CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-            CGGradientRef g = CGGradientCreateWithColorComponents(cs, cols, locs, 3);
-            CGContextDrawLinearGradient(context, g, CGPointMake(last.x, last.y + R), CGPointMake(last.x, last.y - R), 0);
-            CGGradientRelease(g);
-            CGColorSpaceRelease(cs);
-            CGContextRestoreGState(context);
-
-            CGContextAddPath(context, star);
-            CGContextSetLineWidth(context, 2.5);
-            CGContextSetRGBStrokeColor(context, 0.3, 0.17, 0.05, 1);
+        const float W = 11; // tube width in points. ponytail: knob
+        CGContextSetLineCap(context, kCGLineCapRound);
+        CGContextSetLineJoin(context, kCGLineJoinRound);
+        CGContextSaveGState(context);
+        CGContextSetShadowWithColor(context, CGSizeMake(0, -2), 6, [[NSColor colorWithWhite:0 alpha:0.45] CGColor]);
+        CGContextAddPath(context, line);
+        CGContextSetLineWidth(context, W + 3);
+        CGContextSetRGBStrokeColor(context, 0.10, 0.10, 0.11, 1); // dark edge
+        CGContextStrokePath(context);
+        CGContextRestoreGState(context);
+        // Mirror chrome bands, edge to center: bright rim, the dark reflected horizon, a light core.
+        const float bands[][2] = {{W, 0.90f}, {W * 0.64f, 0.28f}, {W * 0.34f, 0.78f}}; // width, gray
+        for (int b = 0; b < 3; b++) {
+            CGContextAddPath(context, line);
+            CGContextSetLineWidth(context, bands[b][0]);
+            CGContextSetGrayStrokeColor(context, bands[b][1], 1);
             CGContextStrokePath(context);
-            CGPathRelease(star);
-
-            CGContextSetRGBFillColor(context, 1, 1, 1, 0.9);
-            CGContextFillEllipseInRect(context, CGRectMake(last.x + 4, last.y + 8, 7, 5));
-            CGContextFillEllipseInRect(context, CGRectMake(last.x + 12, last.y + 2, 3.5, 3.5));
-
         }
+        CGContextSaveGState(context); // highlight, nudged up-left like light from above
+        CGContextTranslateCTM(context, -W * 0.12f, W * 0.14f);
+        CGContextAddPath(context, line);
+        CGContextSetLineWidth(context, W * 0.18f);
+        CGContextSetGrayStrokeColor(context, 1, 0.95);
+        CGContextStrokePath(context);
+        CGContextRestoreGState(context);
 
-        [[NSString stringWithUTF8String:hintText]
-         drawAtPoint:CGPointMake(minX, minY - 70.0)
-         withAttributes:@{
-                          NSFontAttributeName: [NSFont systemFontOfSize:40.0],
-                          NSForegroundColorAttributeName: [NSColor colorWithRed:0.7 green:0.0 blue:0.0 alpha:0.5]
-                          }];
+        // Rope twist, like a sterling cable chain: a blackened groove across the tube every few points, slanted
+        // against the direction of travel, with a polished edge beside it. Clipped to the tube.
+        CGContextSaveGState(context);
+        CGContextAddPath(context, line);
+        CGContextSetLineWidth(context, W);
+        CGContextReplacePathWithStrokedPath(context);
+        CGContextClip(context);
+        {
+            const float twist = 6.5f, slant = 0.95f; // points between grooves; groove angle off the line (radians)
+            float since = 0;
+            BOOL up = YES;
+            NSPoint q = NSZeroPoint;
+            for (NSUInteger i = 0; i < [points count]; i++) {
+                NSPoint p = [[points objectAtIndex:i] pointValue];
+                if (isnan(p.x)) { up = YES; continue; }
+                if (!up) {
+                    float seg = hypotf(p.x - q.x, p.y - q.y), dir = atan2f(p.y - q.y, p.x - q.x), t = twist - since;
+                    for (; t <= seg; t += twist) {
+                        NSPoint c = NSMakePoint(q.x + (p.x - q.x) * t / seg, q.y + (p.y - q.y) * t / seg);
+                        float a = dir + slant, dx = cosf(a) * W * 0.75f, dy = sinf(a) * W * 0.75f;
+                        float ox = cosf(dir) * 1.6f, oy = sinf(dir) * 1.6f;
+                        CGContextSetLineWidth(context, 1.8f);
+                        CGContextSetRGBStrokeColor(context, 0.07, 0.07, 0.08, 0.9);
+                        CGContextStrokeLineSegments(context, (CGPoint[]){{c.x - dx, c.y - dy}, {c.x + dx, c.y + dy}}, 2);
+                        CGContextSetLineWidth(context, 1.0f);
+                        CGContextSetGrayStrokeColor(context, 1, 0.75);
+                        CGContextStrokeLineSegments(context, (CGPoint[]){{c.x - dx + ox, c.y - dy + oy}, {c.x + dx + ox, c.y + dy + oy}}, 2);
+                    }
+                    since = seg - (t - twist);
+                }
+                up = NO;
+                q = p;
+            }
+        }
+        CGContextRestoreGState(context);
+
+        // Glint: a soft white flare that travels the line once a second, so the chrome catches the light.
+        if (walked > 0) {
+            float target = fmodf(phase, 1.0f) * walked, along = 0;
+            penUp = YES;
+            NSPoint prev = NSZeroPoint, glint = last;
+            for (NSUInteger i = 0; i < [points count]; i++) {
+                NSPoint p = [[points objectAtIndex:i] pointValue];
+                if (isnan(p.x)) { penUp = YES; continue; }
+                if (!penUp) {
+                    float seg = hypotf(p.x - prev.x, p.y - prev.y);
+                    if (along + seg >= target && seg > 0) {
+                        float t = (target - along) / seg;
+                        glint = NSMakePoint(prev.x + (p.x - prev.x) * t, prev.y + (p.y - prev.y) * t);
+                        break;
+                    }
+                    along += seg;
+                }
+                penUp = NO;
+                prev = p;
+            }
+            CGContextSaveGState(context);
+            CGContextSetShadowWithColor(context, CGSizeZero, 8, [[NSColor colorWithWhite:1 alpha:0.9] CGColor]);
+            CGContextSetGrayFillColor(context, 1, 0.95);
+            CGContextFillEllipseInRect(context, CGRectMake(glint.x - 2.5f, glint.y - 2.5f, 5, 5));
+            CGContextRestoreGState(context);
+        }
+        CGPathRelease(line);
+
+        if (hintText[0]) { // the letter that fired, in silver with a blackened edge, centered under the drawing
+            NSShadow *shadow = [[[NSShadow alloc] init] autorelease];
+            [shadow setShadowColor:[NSColor colorWithWhite:0 alpha:0.55]];
+            [shadow setShadowOffset:NSMakeSize(0, -2)];
+            [shadow setShadowBlurRadius:6];
+            NSDictionary *attrs = @{NSFontAttributeName: [NSFont systemFontOfSize:56 weight:NSFontWeightHeavy],
+                                    NSForegroundColorAttributeName: [NSColor colorWithWhite:0.92 alpha:1],
+                                    NSStrokeColorAttributeName: [NSColor colorWithWhite:0.08 alpha:1],
+                                    NSStrokeWidthAttributeName: @(-3), // negative: fill and outline
+                                    NSShadowAttributeName: shadow};
+            NSString *text = [NSString stringWithUTF8String:hintText];
+            NSSize size = [text sizeWithAttributes:attrs];
+            [text drawAtPoint:NSMakePoint((minX + maxX - size.width) / 2, MAX(4, minY - size.height - 20)) withAttributes:attrs];
+        }
     }
 }
 
@@ -154,6 +172,10 @@ static CGPathRef warpStarPath(NSPoint c, float R, float tilt) {
     [self setNeedsDisplay:YES];
 }
 
+- (void)dropLastPoints:(int)n { // the lift trim: forget the last n points of the current stroke
+    while (n-- > 0 && [points count] > 0 && !isnan([[points lastObject] pointValue].x)) [points removeLastObject];
+    [self setNeedsDisplay:YES];
+}
 - (void)breakStroke { // pen lift between strokes of a multi-stroke letter
     [points addObject:[NSValue valueWithPoint:NSMakePoint(NAN, NAN)]];
 }

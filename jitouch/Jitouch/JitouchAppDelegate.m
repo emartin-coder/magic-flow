@@ -40,14 +40,14 @@ CGKeyCode keyMap[128]; // for dvorak support
     theMenu = [[[NSMenu alloc] initWithTitle:@"Contextual Menu"] autorelease];
 
     if (enAll)
-        [theMenu insertItemWithTitle:@"Turn Jitouch Off" action:@selector(switchChange:) keyEquivalent:@"" atIndex:0];
+        [theMenu insertItemWithTitle:@"Turn Magic Flow Off" action:@selector(switchChange:) keyEquivalent:@"" atIndex:0];
     else
-        [theMenu insertItemWithTitle:@"Turn Jitouch On" action:@selector(switchChange:) keyEquivalent:@"" atIndex:0];
+        [theMenu insertItemWithTitle:@"Turn Magic Flow On" action:@selector(switchChange:) keyEquivalent:@"" atIndex:0];
 
     //[theMenu insertItem:[NSMenuItem separatorItem] atIndex:1];
     [theMenu insertItemWithTitle:@"Open Preferences..." action:@selector(preferences:) keyEquivalent:@"" atIndex:1];
     [theMenu insertItem:[NSMenuItem separatorItem] atIndex:2];
-    [theMenu insertItemWithTitle:@"Quit Jitouch" action:@selector(quit:) keyEquivalent:@"" atIndex:3];
+    [theMenu insertItemWithTitle:@"Quit Magic Flow" action:@selector(quit:) keyEquivalent:@"" atIndex:3];
 
     NSStatusBar *bar = [NSStatusBar systemStatusBar];
     theItem = [bar statusItemWithLength:NSVariableStatusItemLength];
@@ -63,20 +63,53 @@ CGKeyCode keyMap[128]; // for dvorak support
     theItem = nil;
 }
 
+// Menu bar icon: an Aladdin-style genie lamp, vector-drawn as a template so macOS colors it for light and dark
+// menu bars. On: solid, with a wisp of smoke from the spout. Off: faded, no smoke.
+static NSImage *lampIcon(BOOL on) {
+    NSImage *img = [NSImage imageWithSize:NSMakeSize(22, 16) flipped:NO drawingHandler:^BOOL(NSRect r) {
+        CGContextRef cg = [[NSGraphicsContext currentContext] CGContext];
+        CGContextSetAlpha(cg, on ? 1 : 0.35); // one layer, faded once, so overlapping parts don't darken
+        CGContextBeginTransparencyLayer(cg, NULL);
+        [[NSColor blackColor] set];
+        NSBezierPath *lamp = [NSBezierPath bezierPath];
+        [lamp moveToPoint:NSMakePoint(4, 8)]; // bowl, then the spout out to its tip, then back along the rim
+        [lamp curveToPoint:NSMakePoint(10, 3) controlPoint1:NSMakePoint(4, 5) controlPoint2:NSMakePoint(6.5, 3)];
+        [lamp curveToPoint:NSMakePoint(15, 5.5) controlPoint1:NSMakePoint(12.5, 3) controlPoint2:NSMakePoint(14, 4)];
+        [lamp lineToPoint:NSMakePoint(21, 9.6)];
+        [lamp lineToPoint:NSMakePoint(21, 10.4)];
+        [lamp lineToPoint:NSMakePoint(15.5, 8)];
+        [lamp closePath];
+        [lamp appendBezierPathWithRect:NSMakeRect(9, 2, 2, 1.5)];                              // stem
+        [lamp appendBezierPathWithRoundedRect:NSMakeRect(7.5, 0.8, 5, 1.6) xRadius:0.8 yRadius:0.8]; // foot
+        [lamp appendBezierPathWithOvalInRect:NSMakeRect(7, 7.6, 6, 3)];                        // lid
+        [lamp appendBezierPathWithOvalInRect:NSMakeRect(9.1, 10.3, 1.8, 1.8)];                 // knob
+        [lamp fill];
+        NSBezierPath *handle = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(1, 5.1, 4.2, 4.2)];
+        [handle setLineWidth:1.4];
+        [handle stroke];
+        if (on) {
+            NSBezierPath *wisp = [NSBezierPath bezierPath];
+            [wisp moveToPoint:NSMakePoint(21, 11.2)];
+            [wisp curveToPoint:NSMakePoint(19, 15.4) controlPoint1:NSMakePoint(22.6, 13) controlPoint2:NSMakePoint(17.8, 13.6)];
+            [wisp setLineWidth:1.1];
+            [wisp setLineCapStyle:NSLineCapStyleRound];
+            [wisp stroke];
+        }
+        CGContextEndTransparencyLayer(cg);
+        return YES;
+    }];
+    [img setTemplate:YES];
+    return img;
+}
+
 - (void)updateIconImage {
-    if (enAll) {
-        NSImage *img = [NSImage imageNamed:@"logosmall"];
-        [img setTemplate:YES];
-        [theItem setImage:img];
-    } else {
-        NSImage *img = [NSImage imageNamed:@"logosmalloff"];
-        [img setTemplate:YES];
-        [theItem setImage:img];
-    }
+    [theItem setImage:lampIcon(enAll != 0)];
 }
 
 - (void)preferences:(id)sender  {
-    NSString *prefPath = [@"~/Library/PreferencePanes/Jitouch.prefPane" stringByExpandingTildeInPath];
+    NSString *prefPath = @"/Applications/Magic Flow Settings.app"; // this fork's settings window; the old panel is a fallback
+    if (![[NSFileManager defaultManager] fileExistsAtPath:prefPath])
+        prefPath = [@"~/Library/PreferencePanes/Jitouch.prefPane" stringByExpandingTildeInPath];
     if (![[NSFileManager defaultManager] fileExistsAtPath:prefPath]) {
         prefPath = @"/Library/PreferencePanes/Jitouch.prefPane";
     }
@@ -110,9 +143,9 @@ CGKeyCode keyMap[128]; // for dvorak support
     }
     if (theItem) {
         if (enAll) {
-            [[theMenu itemAtIndex:0] setTitle:@"Turn Jitouch Off"];
+            [[theMenu itemAtIndex:0] setTitle:@"Turn Magic Flow Off"];
         } else {
-            [[theMenu itemAtIndex:0] setTitle:@"Turn Jitouch On"];
+            [[theMenu itemAtIndex:0] setTitle:@"Turn Magic Flow On"];
         }
         [self updateIconImage];
     }

@@ -1,22 +1,24 @@
-# Jitouch FingerDraw
+# Magic Flow
 
-Draw letters with your fingertip on the top of an Apple Magic Mouse, and each letter runs an action: open an app, open a link or file, press a keyboard shortcut. Out of the box, **F** opens Finder and **B** opens your browser. You can map any letter.
+Draw letters with your fingertip on the top of an Apple Magic Mouse, and each letter runs an action: open an app, open a link or file, press a keyboard shortcut. Slide along the mouse's edges to change the volume, brightness, tabs, zoom and more. Out of the box, **F** opens Finder, **B** opens your browser, and the front edge is a volume slider.
 
 ![Draw F with your fingertip on the mouse, and Finder opens](docs/demo.gif)
 
 *A real fingertip F recorded from the Magic Mouse's touch sensor and replayed. The right panel is zoomed. Recorded with the earlier tap-to-start version: letters now start with a short still hold.*
 
-It's a fork of [Jitouch](https://github.com/JitouchApp/Jitouch). Jitouch already recognizes letters on the Magic Mouse, but you draw them by moving the whole mouse. FingerDraw reads your fingertip on the mouse's touch surface instead.
+Magic Flow is a fork of [Jitouch](https://github.com/JitouchApp/Jitouch) (it was called Jitouch FingerDraw until November 2026). Jitouch already recognizes letters on the Magic Mouse, but you draw them by moving the whole mouse. Magic Flow reads your fingertip on the mouse's touch surface instead.
 
 ## What it adds to Jitouch
 
 - **Fingertip drawing on the Magic Mouse surface.** Hold a finger still for half a second, then draw and lift.
+- **Edge sliders.** Touch an edge of the mouse and slide along it. Each edge can be Volume, Brightness, Switch tabs, Zoom, Undo / redo or Switch desktops. Slide right (front and back edges) or forward (side edges) to go up. The front edge is Volume by default and the others are off. Side edges only count near the front, so a thumb resting lower down is ignored.
+- **Magic Flow Settings,** a small app for your letters and edges: turn mouse letters on, map each letter to an action or a recorded keyboard shortcut, and pick a slider for each edge. Changes apply right away.
 - **Tap to click.** A light one-finger tap is a left click; two quick taps double-click (at your system's double-click speed). A two-finger tap is a right click.
-- **Drag with a fingertip.** Touch the top of the mouse and move the mouse right away, and whatever is under the pointer gets dragged until you lift. Or tap, touch again, and move.
-- **Letters with several strokes,** written the normal way, such as F as a stem plus two bars. Built in: A B D E F H K P R T X. Any other multi-stroke letter works once you train it.
+- **Drag with a fingertip.** Touch the top of the mouse and move the mouse right away, and whatever is under the pointer gets dragged until you lift. Or tap, touch again, and move. Slide the finger while dragging to scroll, for example to extend a text selection past the screen.
+- **Every capital, A to Z,** in the usual one- or multi-stroke forms: F as a stem plus two bars, L, V or P with or without lifting, and so on. Draw I with its top and bottom bars, since a single straight line is a scroll. Your trained letters win close calls with the built-in shapes.
 - **Learns your handwriting** (optional). Record each letter a few times, and recognition is matched to how you write.
 - **Doesn't fire while you scroll or click.** A click and a scroll flick both start with a touch, so these are ignored: taps that click the button, touches during scrolling, single straight or back-and-forth strokes, and runs of parallel flicks.
-- **On-screen ink** in the mouse's real proportions, with a ring showing where your finger is.
+- **Chrome ink on screen** in the mouse's real proportions: sterling silver rope with blackened grooves and a glint running along it. The pointer hides while you draw, so only the line shows.
 - **A log** of every gesture, fired or ignored, with the reason: `~/Library/Logs/Jitouch-gestures.log`.
 
 ## How to draw
@@ -29,30 +31,28 @@ Single straight or back-and-forth strokes (up, down, left, right, diagonal) are 
 
 ## Install
 
-### Download (easiest)
-
-1. Download `Jitouch-FingerDraw-<version>.pkg` from [Releases](https://github.com/emartin-coder/jitouch-fingerdraw/releases). Apple silicon Macs only.
-2. Open it. The installer isn't signed with an Apple Developer ID yet, so macOS blocks it the first time. Go to System Settings > Privacy & Security, click **Open Anyway** next to the blocked installer (it's offered for about an hour), and enter your password ([Apple's steps](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac)).
-3. The installer puts the Jitouch settings panel in `/Library/PreferencePanes`. Open it by double-clicking `/Library/PreferencePanes/Jitouch.prefPane` in Finder (Go > Go to Folder). Opening it starts Jitouch and sets it to start at login.
-4. Allow Jitouch under System Settings > Privacy & Security > Accessibility. Then, in the panel's **Characters** tab, under "Enable Character Recognition for", tick **Mouse** and map letters to actions.
-
-To uninstall, delete `/Library/PreferencePanes/Jitouch.prefPane` and `~/Library/LaunchAgents/com.jitouch.Jitouch.plist`.
-
 ### Build from source
 
 Requirements: a Mac with Apple silicon, a Magic Mouse, and the Xcode Command Line Tools (`xcode-select --install`). Full Xcode isn't needed. Tested only on macOS 26.5.
 
 ```sh
-git clone <this repo> && cd <repo>
-./build.sh            # downloads the official Jitouch 2.82.1 bundle, runs the tests, builds, installs
+git clone https://github.com/emartin-coder/magic-flow.git && cd magic-flow
+./make-signing-identity.sh   # once: a local signing certificate, so rebuilds keep the Accessibility permission
+./build.sh                   # downloads the official Jitouch 2.82.1 bundle, runs the tests, builds, installs
 ```
 
-This installs `/Applications/Jitouch.app` and, if you don't already have it, the Jitouch settings panel in `~/Library/PreferencePanes`. Then:
+This installs `/Applications/Magic Flow.app` and `/Applications/Magic Flow Settings.app`, and adds Magic Flow to your login items. Then:
 
-1. Allow Jitouch under System Settings > Privacy & Security > Accessibility.
-2. Open the settings (menu bar icon > Open Preferences...). On the **Characters** tab, under "Enable Character Recognition for", tick **Mouse** (it's off by default), then map letters to actions. Opening the settings also sets Jitouch to start at login.
+1. Allow **Magic Flow** under System Settings > Privacy & Security > Accessibility.
+2. Open **Magic Flow Settings** (or menu bar icon > Open Preferences...). On the **Letters** tab, turn on **Draw letters on the Magic Mouse** (it's off on a fresh install), then map letters to actions. Pick edge sliders on the **Edges** tab.
 
-**Each rebuild resets the Accessibility permission,** because the app is signed only for your Mac. To avoid that, run `./make-signing-identity.sh` once. It creates a local code-signing certificate that `build.sh` uses automatically. Allow Accessibility once more after the first build that uses it.
+Without `./make-signing-identity.sh`, each rebuild resets the Accessibility permission, because the app is then signed only ad hoc.
+
+To uninstall, quit Magic Flow from its menu bar icon, delete both apps from `/Applications`, and remove Magic Flow from System Settings > General > Login Items.
+
+### Download
+
+[Releases](https://github.com/emartin-coder/magic-flow/releases) has an installer (`Jitouch-FingerDraw-<version>.pkg`) for Apple silicon Macs, but it predates the edge sliders and Magic Flow Settings: it installs the original Jitouch settings panel instead. Build from source for the current version.
 
 ## Teach it your handwriting (optional)
 
@@ -60,14 +60,15 @@ This installs `/Applications/Jitouch.app` and, if you don't already have it, the
 tools/train.sh G M Y      # spoken cues: draw each letter 8 times, pause about 2 s between letters, don't tap
 ```
 
-Your examples are saved to `~/Library/Application Support/Jitouch/letters.txt`, and restarting Jitouch loads them. On your next build, `tests/run.sh` checks that each example is recognized using your other examples.
+Your examples are saved to `~/Library/Application Support/Jitouch/letters.txt`, and restarting Magic Flow loads them. On your next build, `tests/run.sh` checks that each example is recognized using your other examples.
 
 ## Limitations
 
 - **Private Apple framework.** Touch data comes from Apple's private MultitouchSupport framework, so a macOS update can break it, and it can't be distributed through the Mac App Store.
 - **Apple silicon only, and not notarized.** You build it yourself.
 - **Tuned on one person.** The timing and matching cutoffs come from one person's hand and one mouse. The scroll check in `tests/run.sh` only has data if you record your own scrolling into `tests/fixtures/negatives/` (`mkdir -p tests/fixtures/negatives && build/touch_probe 120 > tests/fixtures/negatives/my-scrolling.log`). If something misfires, the gesture log says why.
-- **Old settings panel.** It's the original Jitouch one. The fingertip mode has no settings of its own; its tuning values are constants in `jitouch/Jitouch/Gesture.m`.
+- **Tuning values are constants** in `jitouch/Jitouch/Gesture.m` (marked `ponytail: knob`), such as the edge slider step sizes in `mmEdgeStepSize`.
+- **Internal names stay Jitouch.** The app keeps Jitouch's bundle ID (`com.jitouch.Jitouch`), settings file and log name, so settings carry over from Jitouch.
 
 ## Privacy
 
@@ -82,7 +83,8 @@ Recognition, training and logs stay on your Mac. The app's source makes no netwo
 | `tests/replay.sh rec.log` | Replays a recording through the recognizer, with a step-by-step trace |
 | `./build.sh --no-install` | Tests and builds into `build/` without installing |
 | `swift support/make_demo_gif.swift rec.log docs/demo.gif F "opens Finder"` | Renders the README demo from a recording |
-| `tools/make-release.sh 0.1.0` | Builds the installer package into `build/release/` |
+| `swift support/make_icon.swift icon.png [settings]` | Draws the app icon, or with `settings` the Magic Flow Settings icon |
+| `tools/make-release.sh 0.1.0` | Builds the installer package into `build/release/` (still the older panel-based layout) |
 
 ## Credits and license
 
@@ -90,4 +92,4 @@ GPL-3.0, like Jitouch. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 - Jitouch: copyright Supasorn Suwajanakorn and Sukolsak Sakshuwong. Modified work copyright Aaron Kollasch.
 - Multi-stroke recognition implements the $P point-cloud recognizer described by Vatavu, Anthony and Wobbrock (ICMI 2012).
-- FingerDraw changes: copyright 2026 emartin-coder.
+- Magic Flow changes: copyright 2026 emartin-coder.
